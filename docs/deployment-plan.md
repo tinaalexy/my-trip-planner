@@ -2,7 +2,7 @@
 
 > **Stack:** React/Vite → S3 + CloudFront | FastAPI → ECS EC2 (t2.micro) + RDS PostgreSQL  
 > **IaC:** AWS CloudFormation (`infrastructure/stack.yml`)  
-> **Auth:** AWS IAM Identity Center (SSO) locally, GitHub OIDC in CI — no long-term keys anywhere  
+> **Auth:** `aws configure --profile aws-free-tier` locally, GitHub OIDC in CI  
 > **Secrets:** AWS Secrets Manager — never in environment variables or code
 
 ---
@@ -85,16 +85,28 @@ Commit the generated `alembic/versions/` files.
 
 ## Deployment workflow
 
-### Step 1 — Set up AWS SSO profile (once per machine)
+### Step 1 — Configure AWS CLI profile (once per machine)
 
 ```bash
-bash scripts/aws-sso-setup.sh
+aws configure --profile aws-free-tier
 ```
 
-- Guides through enabling IAM Identity Center in the AWS Console
-- Creates a `trip-advisor` CLI profile using short-lived SSO tokens
-- **No long-term keys stored** — credentials expire and are refreshed via browser login
-- Refresh when the session expires (~8 hours): `bash scripts/aws-sso-setup.sh --login`
+Enter when prompted:
+
+```
+AWS Access Key ID:     <from IAM Console → Users → my-trip-advisor-deploy → Security credentials>
+AWS Secret Access Key: <same>
+Default region:        ap-southeast-2
+Default output format: json
+```
+
+Verify it works:
+
+```bash
+aws sts get-caller-identity --profile aws-free-tier
+```
+
+> **Rotate keys periodically** — IAM Console → Users → `my-trip-advisor-deploy` → Security credentials → Make inactive → Create access key.
 
 ### Step 2 — Provision all infrastructure (CloudFormation)
 
@@ -162,12 +174,12 @@ Manual override if needed:
 # Force a backend redeploy from the current image
 aws ecs update-service --cluster my-trip-advisor \
   --service my-trip-advisor-backend --force-new-deployment \
-  --profile trip-advisor --region ap-southeast-2
+  --profile aws-free-tier --region ap-southeast-2
 
 # Force a frontend redeploy
 cd frontend && npm run build
-aws s3 sync dist/ s3://<bucket> --delete --profile trip-advisor
-aws cloudfront create-invalidation --distribution-id <id> --paths "/*" --profile trip-advisor
+aws s3 sync dist/ s3://<bucket> --delete --profile aws-free-tier
+aws cloudfront create-invalidation --distribution-id <id> --paths "/*" --profile aws-free-tier
 ```
 
 ---

@@ -11,7 +11,7 @@
 #   bash scripts/aws-provision.sh --outputs    — print stack outputs only
 #
 # Prerequisites:
-#   bash scripts/aws-sso-setup.sh must have run successfully first.
+#   aws configure --profile aws-free-tier  (run once, enter IAM user keys)
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
