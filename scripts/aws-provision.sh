@@ -29,6 +29,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# ── Load profile from state file (set by aws-free-tier-connect.sh) ───────────
+STATE_FILE_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.aws-state.env"
+if [[ -f "$STATE_FILE_EARLY" ]]; then
+  _SAVED_PROFILE=$(grep "^AWS_PROFILE=" "$STATE_FILE_EARLY" 2>/dev/null | cut -d= -f2-)
+  [[ -n "$_SAVED_PROFILE" ]] && export AWS_PROFILE="${AWS_PROFILE:-$_SAVED_PROFILE}"
+fi
+echo "Using AWS profile: ${AWS_PROFILE:-default}"
+
 # ── Project config ────────────────────────────────────────────────────────────
 REGION="${AWS_REGION:-eu-west-1}"
 PROJECT="my-trip-advisor"
