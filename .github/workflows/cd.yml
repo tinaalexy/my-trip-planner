@@ -9,10 +9,10 @@ on:
 
 jobs:
   # ──────────────────────────────────────────────
-  # BACKEND — build → ECR → App Runner
+  # BACKEND — build → ECR → ECS
   # ──────────────────────────────────────────────
   deploy-backend:
-    name: Deploy Backend (ECR → App Runner)
+    name: Deploy Backend (ECR → ECS)
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
@@ -45,51 +45,85 @@ jobs:
           docker push "$IMAGE_URI:latest"
           echo "image=$IMAGE_URI:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Trigger App Runner deployment
-        id: deploy
+      - name: Register new ECS task definition revision
+        id: task-def
         run: |
-          OPERATION_ID=$(aws apprunner start-deployment \
-            --service-arn "${{ secrets.APP_RUNNER_SERVICE_ARN }}" \
-            --query 'OperationId' --output text)
-          echo "operation_id=$OPERATION_ID" >> "$GITHUB_OUTPUT"
+          # Fetch current task definition, swap image URI, register new revision
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "${{ secrets.ECS_TASK_FAMILY }}" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --query 'taskDefinition' --output json)
 
-      - name: Wait for App Runner deployment to complete
-        env:
-          SERVICE_ARN: ${{ secrets.APP_RUNNER_SERVICE_ARN }}
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | python3 -c "
+          import sys, json
+          td = json.load(sys.stdin)
+          td['containerDefinitions'][0]['image'] = '${{ steps.build.outputs.image }}'
+          for k in ['taskDefinitionArn','revision','status','requiresAttributes',
+                    'compatibilities','registeredAt','registeredBy']:
+              td.pop(k, None)
+          print(json.dumps(td))
+          ")
+
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK_DEF" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          echo "task_def_arn=$NEW_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Update ECS service with new task definition
         run: |
-          echo "Waiting for App Runner service to reach RUNNING status..."
-          for i in $(seq 1 30); do
-            STATUS=$(aws apprunner describe-service \
-              --service-arn "$SERVICE_ARN" \
-              --query 'Service.Status' --output text)
-            echo "  Attempt $i/30 — status: $STATUS"
-            if [ "$STATUS" = "RUNNING" ]; then
-              echo "Deployment complete."
-              exit 0
-            fi
-            if [ "$STATUS" = "CREATE_FAILED" ] || [ "$STATUS" = "DELETE_FAILED" ]; then
-              echo "ERROR: App Runner deployment failed (status: $STATUS)"
-              exit 1
-            fi
-            sleep 20
-          done
-          echo "ERROR: Timed out waiting for App Runner deployment (10 min)"
-          exit 1
+          aws ecs update-service \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --service "${{ secrets.ECS_SERVICE }}" \
+            --task-definition "${{ steps.task-def.outputs.task_def_arn }}" \
+            --force-new-deployment \
+            --region "${{ secrets.AWS_REGION }}"
+
+      - name: Wait for ECS service to stabilize
+        run: |
+          echo "Waiting for ECS service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --services "${{ secrets.ECS_SERVICE }}" \
+            --region "${{ secrets.AWS_REGION }}"
+          echo "Service is stable."
 
       - name: Smoke test — health endpoint
         run: |
-          SERVICE_URL=$(aws apprunner describe-service \
-            --service-arn "${{ secrets.APP_RUNNER_SERVICE_ARN }}" \
-            --query 'Service.ServiceUrl' --output text)
-          echo "Smoke testing https://$SERVICE_URL/health ..."
+          # Resolve EC2 public DNS via ECS → container instance → EC2
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --service-name "${{ secrets.ECS_SERVICE }}" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --query 'taskArns[0]' --output text)
+
+          CI_ARN=$(aws ecs describe-tasks \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --tasks "$TASK_ARN" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --query 'tasks[0].containerInstanceArn' --output text)
+
+          EC2_ID=$(aws ecs describe-container-instances \
+            --cluster "${{ secrets.ECS_CLUSTER }}" \
+            --container-instances "$CI_ARN" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --query 'containerInstances[0].ec2InstanceId' --output text)
+
+          EC2_DNS=$(aws ec2 describe-instances \
+            --instance-ids "$EC2_ID" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
+
+          echo "Smoke testing http://$EC2_DNS/health ..."
           for i in $(seq 1 5); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "https://$SERVICE_URL/health")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://$EC2_DNS/health")
             if [ "$STATUS" = "200" ]; then
               echo "Health check passed (HTTP 200)."
               exit 0
             fi
-            echo "  Attempt $i/5 — got HTTP $STATUS, retrying in 10s..."
-            sleep 10
+            echo "  Attempt $i/5 — HTTP $STATUS, retrying in 15s..."
+            sleep 15
           done
           echo "ERROR: Health check failed after 5 attempts."
           exit 1
@@ -138,7 +172,7 @@ jobs:
             --delete \
             --cache-control "public, max-age=31536000, immutable" \
             --exclude "index.html"
-          # index.html must not be cached — browsers always fetch a fresh copy
+          # index.html must never be cached — always fetch fresh for React Router
           aws s3 cp dist/index.html "s3://${{ secrets.S3_BUCKET }}/index.html" \
             --cache-control "no-cache, no-store, must-revalidate"
 
@@ -161,7 +195,7 @@ jobs:
               echo "CloudFront smoke test passed (HTTP 200)."
               exit 0
             fi
-            echo "  Attempt $i/5 — got HTTP $STATUS, retrying in 15s..."
+            echo "  Attempt $i/5 — HTTP $STATUS, retrying in 15s..."
             sleep 15
           done
           echo "ERROR: CloudFront smoke test failed after 5 attempts."

@@ -6,10 +6,11 @@
 set -uo pipefail
 
 # ── Config (edit these to match your deployment) ─────────────────────────────
-REGION="${AWS_REGION:-eu-west-1}"
+REGION="${AWS_REGION:-ap-southeast-2}"
 ECR_REPO="my-trip-advisor-backend"
 S3_BUCKET="my-trip-advisor-frontend"
-APP_RUNNER_SERVICE="my-trip-advisor-backend"
+ECS_CLUSTER="my-trip-advisor"
+ECS_SERVICE="my-trip-advisor-backend"
 RDS_IDENTIFIER="my-trip-advisor-db"
 CREATE_MODE=false
 [[ "${1:-}" == "--create" ]] && CREATE_MODE=true
@@ -109,26 +110,40 @@ else
   ok "RDS endpoint: $RDS_ENDPOINT"
 fi
 
-# ── 5. App Runner service ─────────────────────────────────────────────────────
-step "App Runner — backend service ($APP_RUNNER_SERVICE)"
-AR_STATUS=$(aws apprunner list-services \
-  --region "$REGION" \
-  --query "ServiceSummaryList[?ServiceName=='$APP_RUNNER_SERVICE'].Status" \
-  --output text 2>/dev/null)
+# ── 5. ECS service ────────────────────────────────────────────────────────────
+step "ECS — cluster and service ($ECS_CLUSTER / $ECS_SERVICE)"
+ECS_STATUS=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$REGION" \
+  --query 'clusters[0].status' --output text 2>/dev/null)
 
-if [[ -z "$AR_STATUS" ]]; then
-  missing "App Runner service '$APP_RUNNER_SERVICE' not found"
-  if $CREATE_MODE; then
-    warn "App Runner requires the ECR image and VPC connector — create it manually."
-    warn "Follow Section 3 Step 4 in docs/deployment-plan.md"
-  fi
+if [[ -z "$ECS_STATUS" || "$ECS_STATUS" == "None" || "$ECS_STATUS" == "INACTIVE" ]]; then
+  missing "ECS cluster '$ECS_CLUSTER' not found — run: bash scripts/aws-provision.sh"
 else
-  ok "App Runner status: $AR_STATUS"
-  AR_URL=$(aws apprunner list-services \
-    --region "$REGION" \
-    --query "ServiceSummaryList[?ServiceName=='$APP_RUNNER_SERVICE'].ServiceUrl" \
-    --output text 2>/dev/null)
-  ok "App Runner URL: https://$AR_URL"
+  ok "ECS cluster status: $ECS_STATUS"
+  SVC_STATUS=$(aws ecs describe-services \
+    --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --region "$REGION" \
+    --query 'services[0].status' --output text 2>/dev/null)
+  if [[ -z "$SVC_STATUS" || "$SVC_STATUS" != "ACTIVE" ]]; then
+    missing "ECS service '$ECS_SERVICE' not found"
+  else
+    RUNNING=$(aws ecs describe-services \
+      --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --region "$REGION" \
+      --query 'services[0].runningCount' --output text 2>/dev/null)
+    ok "ECS service status: $SVC_STATUS ($RUNNING running task(s))"
+    # Resolve EC2 public DNS
+    TASK_ARN=$(aws ecs list-tasks --cluster "$ECS_CLUSTER" \
+      --service-name "$ECS_SERVICE" --region "$REGION" \
+      --query 'taskArns[0]' --output text 2>/dev/null)
+    if [[ -n "$TASK_ARN" && "$TASK_ARN" != "None" ]]; then
+      CI_ARN=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN" \
+        --region "$REGION" --query 'tasks[0].containerInstanceArn' --output text)
+      EC2_ID=$(aws ecs describe-container-instances --cluster "$ECS_CLUSTER" \
+        --container-instances "$CI_ARN" --region "$REGION" \
+        --query 'containerInstances[0].ec2InstanceId' --output text)
+      EC2_DNS=$(aws ec2 describe-instances --instance-ids "$EC2_ID" --region "$REGION" \
+        --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
+      ok "Backend URL: http://$EC2_DNS"
+    fi
+  fi
 fi
 
 # ── 6. S3 bucket ──────────────────────────────────────────────────────────────
@@ -183,12 +198,14 @@ printf "   %-35s %s\n" "AWS_ACCOUNT_ID"             "$ACCOUNT"
 printf "   %-35s %s\n" "AWS_REGION"                 "$REGION"
 printf "   %-35s %s\n" "ECR_REGISTRY"               "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 printf "   %-35s %s\n" "ECR_REPOSITORY"             "$ECR_REPO"
+printf "   %-35s %s\n" "ECS_CLUSTER"                "$ECS_CLUSTER"
+printf "   %-35s %s\n" "ECS_SERVICE"                "$ECS_SERVICE"
+printf "   %-35s %s\n" "ECS_TASK_FAMILY"            "${ECS_SERVICE}"
 printf "   %-35s %s\n" "S3_BUCKET"                  "$S3_BUCKET"
-printf "   %-35s %s\n" "APP_RUNNER_SERVICE_ARN"     "<get from App Runner console>"
 printf "   %-35s %s\n" "CLOUDFRONT_DISTRIBUTION_ID" "${CF_ID:-<get from CloudFront console>}"
 printf "   %-35s %s\n" "AWS_ACCESS_KEY_ID"          "<from IAM user credentials>"
 printf "   %-35s %s\n" "AWS_SECRET_ACCESS_KEY"      "<from IAM user credentials>"
-printf "   %-35s %s\n" "VITE_API_BASE_URL"          "<App Runner URL>/api/v1"
+printf "   %-35s %s\n" "VITE_API_BASE_URL"          "http://<EC2 public DNS>/api/v1"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo
@@ -201,10 +218,7 @@ else
   echo  "  Run with --create to auto-create what can be scripted:"
   echo  "    bash scripts/aws-setup.sh --create"
   echo
-  echo  "  Resources requiring manual setup (Console or CloudFormation):"
-  echo  "    • RDS (needs VPC + security group config)"
-  echo  "    • App Runner (needs ECR image + VPC connector)"
-  echo  "    • CloudFront (needs OAC + S3 bucket policy)"
-  echo  "  See docs/deployment-plan.md Section 3 for step-by-step instructions."
+  echo  "  Run the full provisioning script to create everything:"
+  echo  "    bash scripts/aws-provision.sh"
 fi
 hr

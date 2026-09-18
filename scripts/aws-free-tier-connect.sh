@@ -9,8 +9,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-PROFILE="trip-advisor"
-REGION="eu-west-1"
+PROFILE="505435644200-aws-free-tier"
+REGION="ap-southeast-2"
 VERIFY_ONLY=false
 [[ "${1:-}" == "--verify" ]] && VERIFY_ONLY=true
 
@@ -185,7 +185,7 @@ check_perm "S3"          s3api        list-buckets
 check_perm "EC2 / VPC"   ec2          describe-vpcs
 check_perm "RDS"         rds          describe-db-instances
 check_perm "IAM"         iam          list-roles
-check_perm "App Runner"  apprunner    list-services
+check_perm "ECS"         ecs          list-clusters
 check_perm "CloudFront"  cloudfront   list-distributions
 
 if $PERM_FAIL; then

@@ -4,28 +4,22 @@
 # Creates (in order, idempotent — safe to re-run):
 #   1. ECR repository
 #   2. S3 bucket (frontend, public access blocked)
-#   3. Security groups  (RDS + App Runner)
+#   3. Security groups  (EC2 + RDS)
 #   4. RDS PostgreSQL   (db.t3.micro, free-tier)
-#   5. App Runner IAM access role
-#   6. App Runner VPC connector
-#   7. App Runner service
-#   8. CloudFront OAC + distribution
-#   9. Update App Runner CORS_ORIGINS → CloudFront URL
-#  10. Print GitHub Secrets summary + state file
+#   5. ECS cluster + IAM roles + EC2 instance + task definition + service
+#   6. CloudFront OAC + distribution
+#   7. Update ECS task definition CORS_ORIGINS → CloudFront URL
+#   8. Print GitHub Secrets summary + state file
 #
 # Usage:
 #   bash scripts/aws-provision.sh
 #
 # Prerequisites:
-#   - AWS CLI configured with an IAM user/role that has the permissions
-#     listed in the REQUIRED PERMISSIONS section below
+#   - Run bash scripts/aws-free-tier-connect.sh first
 #   - Docker installed (for the initial ECR image push)
 #
 # Required IAM permissions:
-#   ecr:*, s3:*, rds:*, ec2:Describe*, ec2:CreateSecurityGroup,
-#   ec2:AuthorizeSecurityGroupIngress, ec2:AuthorizeSecurityGroupEgress,
-#   iam:CreateRole, iam:AttachRolePolicy, iam:GetRole, iam:PassRole,
-#   apprunner:*, cloudfront:*
+#   ecr:*, s3:*, rds:*, ec2:*, ecs:*, iam:*, logs:*, cloudfront:*
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -38,34 +32,36 @@ fi
 echo "Using AWS profile: ${AWS_PROFILE:-default}"
 
 # ── Project config ────────────────────────────────────────────────────────────
-REGION="${AWS_REGION:-eu-west-1}"
+REGION="${AWS_REGION:-ap-southeast-2}"
 PROJECT="my-trip-advisor"
 ECR_REPO="${PROJECT}-backend"
 S3_BUCKET="${PROJECT}-frontend"
 RDS_IDENTIFIER="${PROJECT}-db"
 RDS_DB_NAME="tripplanner"
 RDS_USER="tripuser"
-AR_SERVICE="${PROJECT}-backend"
-AR_ROLE="${PROJECT}-apprunner-ecr-role"
+EC2_SG_NAME="${PROJECT}-ec2-sg"
 RDS_SG_NAME="${PROJECT}-rds-sg"
-AR_SG_NAME="${PROJECT}-apprunner-sg"
-VPC_CONNECTOR_NAME="${PROJECT}-vpc-connector"
+ECS_CLUSTER="${PROJECT}"
+ECS_TASK_FAMILY="${PROJECT}-backend"
+ECS_SERVICE="${PROJECT}-backend"
+ECS_EXEC_ROLE="${PROJECT}-ecs-execution-role"
+ECS_INSTANCE_ROLE="${PROJECT}-ecs-instance-role"
+EC2_INSTANCE_PROFILE="${PROJECT}-ecs-instance-profile"
+LOG_GROUP="/ecs/${ECS_TASK_FAMILY}"
 STATE_FILE="$(dirname "${BASH_SOURCE[0]}")/../.aws-state.env"
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 RED='\033[31m'; GRN='\033[32m'; YLW='\033[33m'; BLD='\033[1m'; RST='\033[0m'
-ok()      { printf "   ${GRN}✓${RST}  %s\n" "$1"; }
-warn()    { printf "   ${YLW}⚠${RST}  %s\n" "$1"; }
-err()     { printf "   ${RED}✗${RST}  %s\n" "$1"; }
-step()    { echo; printf "${BLD}▶  %s${RST}\n" "$1"; }
-hr()      { echo "═══════════════════════════════════════════════════"; }
-die()     { err "$1"; echo; exit 1; }
+ok()   { printf "   ${GRN}✓${RST}  %s\n" "$1"; }
+warn() { printf "   ${YLW}⚠${RST}  %s\n" "$1"; }
+err()  { printf "   ${RED}✗${RST}  %s\n" "$1"; }
+step() { echo;  printf "${BLD}▶  %s${RST}\n" "$1"; }
+hr()   { echo "═══════════════════════════════════════════════════"; }
+die()  { err "$1"; echo; exit 1; }
 
 # ── State helpers ─────────────────────────────────────────────────────────────
 save_state() { echo "$1=$2" >> "$STATE_FILE"; }
-load_state() { grep -E "^$1=" "$STATE_FILE" 2>/dev/null | cut -d= -f2-; }
-
-# Ensure state file exists
+load_state() { grep -E "^$1=" "$STATE_FILE" 2>/dev/null | tail -1 | cut -d= -f2-; }
 touch "$STATE_FILE"
 
 hr
@@ -77,69 +73,48 @@ hr
 # PHASE 0 — Prerequisites
 # ─────────────────────────────────────────────────────────────────────────────
 step "Phase 0 — Prerequisites"
+command -v aws &>/dev/null || die "AWS CLI not installed."
 
-# AWS CLI
-command -v aws &>/dev/null || die "AWS CLI not installed. https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html"
-ok "AWS CLI: $(aws --version 2>&1 | awk '{print $1}')"
-
-# Credentials
 IDENTITY=$(aws sts get-caller-identity --output json 2>&1) \
-  || die "Not authenticated. Run: aws configure"
+  || die "Not authenticated. Run: bash scripts/aws-free-tier-connect.sh"
 ACCOUNT=$(echo "$IDENTITY" | python3 -c "import sys,json; print(json.load(sys.stdin)['Account'])")
 ARN=$(echo "$IDENTITY"     | python3 -c "import sys,json; print(json.load(sys.stdin)['Arn'])")
 ok "Account : $ACCOUNT"
 ok "Identity: $ARN"
 ECR_REGISTRY="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 
-# Permission probe — catch limited roles early
 step "Phase 0 — Permission check"
 PERM_FAIL=false
 check_perm() {
-  local svc=$1 action=$2
-  if ! aws $svc $action --region "$REGION" &>/dev/null 2>&1; then
-    err "Missing permission: $svc $action"
-    PERM_FAIL=true
+  local label=$1 svc=$2; shift 2
+  if aws "$svc" "$@" --region "$REGION" &>/dev/null 2>&1; then
+    ok "$label"
   else
-    ok "$svc $action"
+    err "$label — MISSING"
+    PERM_FAIL=true
   fi
 }
-
-check_perm ecr    "describe-repositories"
-check_perm s3api  "list-buckets"
-check_perm ec2    "describe-vpcs"
-check_perm rds    "describe-db-instances"
-check_perm iam    "list-roles"
-check_perm apprunner "list-services"
-check_perm cloudfront "list-distributions"
+check_perm "ECR"        ecr        describe-repositories
+check_perm "S3"         s3api      list-buckets
+check_perm "EC2 / VPC"  ec2        describe-vpcs
+check_perm "RDS"        rds        describe-db-instances
+check_perm "ECS"        ecs        list-clusters
+check_perm "IAM"        iam        list-roles
+check_perm "CloudFront" cloudfront list-distributions
 
 if $PERM_FAIL; then
   echo
-  warn "The current AWS identity is missing required permissions."
-  warn "This is likely a role-scoped identity (e.g. Bedrock-only)."
-  echo
-  echo "  Fix options:"
-  echo "  A) Create a personal AWS Free Tier account at aws.amazon.com"
-  echo "     then run:  aws configure  (with the new account's IAM user keys)"
-  echo
-  echo "  B) Ask your AWS admin to attach these policies to your current role:"
-  echo "       AmazonEC2ContainerRegistryFullAccess"
-  echo "       AmazonS3FullAccess"
-  echo "       AmazonRDSFullAccess"
-  echo "       AmazonVPCFullAccess"
-  echo "       IAMFullAccess"
-  echo "       AWSAppRunnerFullAccess"
-  echo "       CloudFrontFullAccess"
-  echo
-  echo "  Then re-run:  bash scripts/aws-provision.sh"
-  hr
-  exit 1
+  warn "Missing permissions — attach these policies to your IAM user:"
+  echo "    AmazonEC2ContainerRegistryFullAccess"
+  echo "    AmazonS3FullAccess  AmazonRDSFullAccess  AmazonVPCFullAccess"
+  echo "    AmazonECS_FullAccess  IAMFullAccess  CloudFrontFullAccess"
+  echo "    CloudWatchLogsFullAccess"
+  hr; exit 1
 fi
 
-# Docker
 if ! command -v docker &>/dev/null; then
   warn "Docker not installed — initial ECR image push will be skipped."
   warn "Install Docker Desktop: https://www.docker.com/products/docker-desktop"
-  warn "The CD pipeline will push the first image automatically on the next push to main."
   DOCKER_AVAILABLE=false
 else
   ok "Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null)"
@@ -164,21 +139,18 @@ else
 fi
 save_state "ECR_URI" "$ECR_URI"
 
-# Push placeholder image (so App Runner can start)
 if $DOCKER_AVAILABLE; then
   step "Phase 1b — Push initial Docker image to ECR"
-  IMAGE_URI="$ECR_URI:latest"
   EXISTING_IMAGE=$(aws ecr describe-images \
     --repository-name "$ECR_REPO" --region "$REGION" \
     --query 'imageDetails[0].imageTags[0]' --output text 2>/dev/null)
-
   if [[ -z "$EXISTING_IMAGE" || "$EXISTING_IMAGE" == "None" ]]; then
     REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     aws ecr get-login-password --region "$REGION" \
       | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-    docker build -t "$IMAGE_URI" "$REPO_ROOT/backend"
-    docker push "$IMAGE_URI"
-    ok "Initial image pushed: $IMAGE_URI"
+    docker build -t "$ECR_URI:latest" "$REPO_ROOT/backend"
+    docker push "$ECR_URI:latest"
+    ok "Initial image pushed: $ECR_URI:latest"
   else
     ok "Image already exists in ECR — skipping build"
   fi
@@ -215,51 +187,55 @@ VPC_CIDR=$(aws ec2 describe-vpcs --region "$REGION" \
   --query 'Vpcs[0].CidrBlock' --output text)
 ok "Default VPC: $VPC_ID ($VPC_CIDR)"
 
-# Fetch subnet IDs (at least 2 AZs required by RDS)
 SUBNET_IDS=$(aws ec2 describe-subnets --region "$REGION" \
   --filters "Name=vpc-id,Values=$VPC_ID" "Name=defaultForAz,Values=true" \
   --query 'Subnets[*].SubnetId' --output text | tr '\t' ',')
+# Take just the first subnet for EC2 launch
+FIRST_SUBNET=$(echo "$SUBNET_IDS" | cut -d',' -f1)
 ok "Subnets: $SUBNET_IDS"
 save_state "VPC_ID"     "$VPC_ID"
 save_state "SUBNET_IDS" "$SUBNET_IDS"
 
-# App Runner security group
-AR_SG_ID=$(aws ec2 describe-security-groups --region "$REGION" \
-  --filters "Name=group-name,Values=$AR_SG_NAME" "Name=vpc-id,Values=$VPC_ID" \
+# EC2 security group — port 80 inbound (API), all outbound (to reach RDS)
+EC2_SG_ID=$(aws ec2 describe-security-groups --region "$REGION" \
+  --filters "Name=group-name,Values=$EC2_SG_NAME" "Name=vpc-id,Values=$VPC_ID" \
   --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
-if [[ -z "$AR_SG_ID" || "$AR_SG_ID" == "None" ]]; then
-  AR_SG_ID=$(aws ec2 create-security-group \
-    --group-name "$AR_SG_NAME" \
-    --description "App Runner VPC connector outbound" \
+if [[ -z "$EC2_SG_ID" || "$EC2_SG_ID" == "None" ]]; then
+  EC2_SG_ID=$(aws ec2 create-security-group \
+    --group-name "$EC2_SG_NAME" \
+    --description "ECS EC2 instance — port 80 public" \
     --vpc-id "$VPC_ID" --region "$REGION" \
     --query 'GroupId' --output text)
-  ok "Created App Runner security group: $AR_SG_ID"
+  aws ec2 authorize-security-group-ingress \
+    --group-id "$EC2_SG_ID" --region "$REGION" \
+    --protocol tcp --port 80 --cidr 0.0.0.0/0 > /dev/null
+  ok "Created EC2 security group: $EC2_SG_ID (port 80 ← 0.0.0.0/0)"
 else
-  ok "App Runner SG exists: $AR_SG_ID"
+  ok "EC2 SG exists: $EC2_SG_ID"
 fi
-save_state "AR_SG_ID" "$AR_SG_ID"
+save_state "EC2_SG_ID" "$EC2_SG_ID"
 
-# RDS security group — allow port 5432 from App Runner SG
+# RDS security group — port 5432 from EC2 SG only
 RDS_SG_ID=$(aws ec2 describe-security-groups --region "$REGION" \
   --filters "Name=group-name,Values=$RDS_SG_NAME" "Name=vpc-id,Values=$VPC_ID" \
   --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
 if [[ -z "$RDS_SG_ID" || "$RDS_SG_ID" == "None" ]]; then
   RDS_SG_ID=$(aws ec2 create-security-group \
     --group-name "$RDS_SG_NAME" \
-    --description "RDS PostgreSQL access from App Runner" \
+    --description "RDS PostgreSQL — port 5432 from ECS EC2 only" \
     --vpc-id "$VPC_ID" --region "$REGION" \
     --query 'GroupId' --output text)
   aws ec2 authorize-security-group-ingress \
     --group-id "$RDS_SG_ID" --region "$REGION" \
-    --protocol tcp --port 5432 --source-group "$AR_SG_ID" > /dev/null
-  ok "Created RDS security group: $RDS_SG_ID (port 5432 ← $AR_SG_ID)"
+    --protocol tcp --port 5432 --source-group "$EC2_SG_ID" > /dev/null
+  ok "Created RDS security group: $RDS_SG_ID (port 5432 ← $EC2_SG_ID)"
 else
   ok "RDS SG exists: $RDS_SG_ID"
 fi
 save_state "RDS_SG_ID" "$RDS_SG_ID"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 4 — RDS PostgreSQL  (longest step — ~8 min)
+# PHASE 4 — RDS PostgreSQL  (~8 min)
 # ─────────────────────────────────────────────────────────────────────────────
 step "Phase 4 — RDS PostgreSQL"
 
@@ -268,12 +244,9 @@ RDS_STATUS=$(aws rds describe-db-instances \
   --query 'DBInstances[0].DBInstanceStatus' --output text 2>/dev/null)
 
 if [[ -z "$RDS_STATUS" || "$RDS_STATUS" == "None" ]]; then
-  # Generate a random DB password (16 chars, alphanumeric only — no special chars
-  # that would need URL-encoding in DATABASE_URL)
   RDS_PASSWORD=$(python3 -c "import secrets,string; \
     print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(16)))")
 
-  # Build subnet group (required; must span ≥2 AZs)
   DB_SUBNET_GROUP="${PROJECT}-subnet-group"
   aws rds describe-db-subnet-groups \
     --db-subnet-group-name "$DB_SUBNET_GROUP" --region "$REGION" &>/dev/null \
@@ -286,40 +259,34 @@ if [[ -z "$RDS_STATUS" || "$RDS_STATUS" == "None" ]]; then
   aws rds create-db-instance \
     --db-instance-identifier "$RDS_IDENTIFIER" \
     --db-instance-class db.t3.micro \
-    --engine postgres \
-    --engine-version "16.3" \
+    --engine postgres --engine-version "16.3" \
     --master-username "$RDS_USER" \
     --master-user-password "$RDS_PASSWORD" \
     --db-name "$RDS_DB_NAME" \
-    --allocated-storage 20 \
-    --storage-type gp2 \
+    --allocated-storage 20 --storage-type gp2 \
     --vpc-security-group-ids "$RDS_SG_ID" \
     --db-subnet-group-name "$DB_SUBNET_GROUP" \
-    --no-publicly-accessible \
-    --no-multi-az \
-    --no-deletion-protection \
+    --no-publicly-accessible --no-multi-az --no-deletion-protection \
     --region "$REGION" > /dev/null
 
   save_state "RDS_PASSWORD" "$RDS_PASSWORD"
-  ok "RDS instance creation started (this takes ~8 minutes)..."
-  ok "Credentials saved to .aws-state.env"
+  ok "RDS creation started (~8 min)..."
 else
   RDS_PASSWORD=$(load_state "RDS_PASSWORD")
-  ok "RDS instance exists — status: $RDS_STATUS"
+  ok "RDS exists — status: $RDS_STATUS"
 fi
 
-# Wait for RDS to become available
-echo "   Waiting for RDS to reach 'available' state (polling every 30s)..."
+echo "   Waiting for RDS to reach 'available'..."
 for i in $(seq 1 25); do
   RDS_STATUS=$(aws rds describe-db-instances \
     --db-instance-identifier "$RDS_IDENTIFIER" --region "$REGION" \
     --query 'DBInstances[0].DBInstanceStatus' --output text)
-  echo "     Attempt $i/25 — status: $RDS_STATUS"
+  echo "     Attempt $i/25 — $RDS_STATUS"
   [[ "$RDS_STATUS" == "available" ]] && break
   [[ "$RDS_STATUS" == "failed" ]]    && die "RDS creation failed."
   sleep 30
 done
-[[ "$RDS_STATUS" != "available" ]] && die "RDS timed out after ~12 min."
+[[ "$RDS_STATUS" != "available" ]] && die "RDS timed out."
 
 RDS_ENDPOINT=$(aws rds describe-db-instances \
   --db-instance-identifier "$RDS_IDENTIFIER" --region "$REGION" \
@@ -330,111 +297,195 @@ save_state "RDS_ENDPOINT" "$RDS_ENDPOINT"
 save_state "DATABASE_URL" "$DATABASE_URL"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 5 — App Runner IAM role + VPC connector + service
+# PHASE 5 — ECS cluster + IAM roles + EC2 instance + task + service
 # ─────────────────────────────────────────────────────────────────────────────
-step "Phase 5 — App Runner IAM access role"
+step "Phase 5a — ECS cluster"
+CLUSTER_STATUS=$(aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$REGION" \
+  --query 'clusters[0].status' --output text 2>/dev/null)
+if [[ "$CLUSTER_STATUS" != "ACTIVE" ]]; then
+  aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$REGION" > /dev/null
+  ok "Created ECS cluster: $ECS_CLUSTER"
+else
+  ok "ECS cluster exists: $ECS_CLUSTER"
+fi
 
-AR_ROLE_ARN=$(aws iam get-role --role-name "$AR_ROLE" \
+step "Phase 5b — ECS task execution role"
+ECS_EXEC_ROLE_ARN=$(aws iam get-role --role-name "$ECS_EXEC_ROLE" \
   --query 'Role.Arn' --output text 2>/dev/null)
-if [[ -z "$AR_ROLE_ARN" || "$AR_ROLE_ARN" == "None" ]]; then
-  TRUST_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"build.apprunner.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
-  AR_ROLE_ARN=$(aws iam create-role \
-    --role-name "$AR_ROLE" \
-    --assume-role-policy-document "$TRUST_POLICY" \
+if [[ -z "$ECS_EXEC_ROLE_ARN" || "$ECS_EXEC_ROLE_ARN" == "None" ]]; then
+  TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  ECS_EXEC_ROLE_ARN=$(aws iam create-role \
+    --role-name "$ECS_EXEC_ROLE" \
+    --assume-role-policy-document "$TRUST" \
     --query 'Role.Arn' --output text)
-  aws iam attach-role-policy \
-    --role-name "$AR_ROLE" \
-    --policy-arn "arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess"
-  ok "Created IAM role: $AR_ROLE_ARN"
+  aws iam attach-role-policy --role-name "$ECS_EXEC_ROLE" \
+    --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+  ok "Created ECS execution role: $ECS_EXEC_ROLE_ARN"
 else
-  ok "IAM role exists: $AR_ROLE_ARN"
+  ok "ECS execution role exists: $ECS_EXEC_ROLE_ARN"
 fi
-save_state "AR_ROLE_ARN" "$AR_ROLE_ARN"
+save_state "ECS_EXEC_ROLE_ARN" "$ECS_EXEC_ROLE_ARN"
 
-step "Phase 5b — App Runner VPC connector"
-VPC_CONNECTOR_ARN=$(aws apprunner list-vpc-connectors --region "$REGION" \
-  --query "VpcConnectors[?VpcConnectorName=='$VPC_CONNECTOR_NAME' && Status=='ACTIVE'].VpcConnectorArn" \
-  --output text 2>/dev/null)
-if [[ -z "$VPC_CONNECTOR_ARN" ]]; then
-  VPC_CONNECTOR_ARN=$(aws apprunner create-vpc-connector \
-    --vpc-connector-name "$VPC_CONNECTOR_NAME" \
-    --subnets $(echo "$SUBNET_IDS" | tr ',' ' ') \
-    --security-groups "$AR_SG_ID" \
+step "Phase 5c — EC2 instance role + profile"
+EC2_ROLE_ARN=$(aws iam get-role --role-name "$ECS_INSTANCE_ROLE" \
+  --query 'Role.Arn' --output text 2>/dev/null)
+if [[ -z "$EC2_ROLE_ARN" || "$EC2_ROLE_ARN" == "None" ]]; then
+  TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+  EC2_ROLE_ARN=$(aws iam create-role \
+    --role-name "$ECS_INSTANCE_ROLE" \
+    --assume-role-policy-document "$TRUST" \
+    --query 'Role.Arn' --output text)
+  aws iam attach-role-policy --role-name "$ECS_INSTANCE_ROLE" \
+    --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+  ok "Created EC2 instance role: $EC2_ROLE_ARN"
+else
+  ok "EC2 instance role exists: $EC2_ROLE_ARN"
+fi
+
+# Instance profile (wraps the role so EC2 can assume it)
+aws iam get-instance-profile --instance-profile-name "$EC2_INSTANCE_PROFILE" &>/dev/null \
+|| {
+  aws iam create-instance-profile \
+    --instance-profile-name "$EC2_INSTANCE_PROFILE" > /dev/null
+  aws iam add-role-to-instance-profile \
+    --instance-profile-name "$EC2_INSTANCE_PROFILE" \
+    --role-name "$ECS_INSTANCE_ROLE"
+  sleep 10   # IAM propagation
+  ok "Created instance profile: $EC2_INSTANCE_PROFILE"
+}
+ok "Instance profile ready"
+save_state "EC2_INSTANCE_PROFILE" "$EC2_INSTANCE_PROFILE"
+
+step "Phase 5d — CloudWatch log group"
+aws logs create-log-group --log-group-name "$LOG_GROUP" --region "$REGION" 2>/dev/null \
+  && ok "Created log group: $LOG_GROUP" \
+  || ok "Log group exists: $LOG_GROUP"
+
+step "Phase 5e — EC2 instance (ECS-optimized t2.micro)"
+EC2_INSTANCE_ID=$(load_state "EC2_INSTANCE_ID")
+
+if [[ -z "$EC2_INSTANCE_ID" ]]; then
+  # Get latest ECS-optimized Amazon Linux 2 AMI for the region
+  ECS_AMI=$(aws ssm get-parameters \
+    --names /aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id \
+    --region "$REGION" --query 'Parameters[0].Value' --output text)
+  ok "ECS-optimized AMI: $ECS_AMI"
+
+  # User data registers the instance with the ECS cluster
+  USER_DATA=$(base64 <<EOF
+#!/bin/bash
+echo ECS_CLUSTER=${ECS_CLUSTER} >> /etc/ecs/ecs.config
+EOF
+)
+
+  EC2_INSTANCE_ID=$(aws ec2 run-instances \
+    --image-id "$ECS_AMI" \
+    --instance-type t2.micro \
+    --iam-instance-profile Name="$EC2_INSTANCE_PROFILE" \
+    --security-group-ids "$EC2_SG_ID" \
+    --subnet-id "$FIRST_SUBNET" \
+    --associate-public-ip-address \
+    --user-data "$USER_DATA" \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${PROJECT}-ecs-host}]" \
     --region "$REGION" \
-    --query 'VpcConnector.VpcConnectorArn' --output text)
-  ok "Created VPC connector: $VPC_CONNECTOR_ARN"
+    --query 'Instances[0].InstanceId' --output text)
+
+  save_state "EC2_INSTANCE_ID" "$EC2_INSTANCE_ID"
+  ok "Launched EC2 instance: $EC2_INSTANCE_ID — waiting for it to be running..."
+
+  aws ec2 wait instance-running --instance-ids "$EC2_INSTANCE_ID" --region "$REGION"
+  ok "Instance is running"
 else
-  ok "VPC connector exists: $VPC_CONNECTOR_ARN"
+  ok "EC2 instance exists: $EC2_INSTANCE_ID"
 fi
-save_state "VPC_CONNECTOR_ARN" "$VPC_CONNECTOR_ARN"
 
-step "Phase 5c — App Runner service"
-AR_SERVICE_ARN=$(aws apprunner list-services --region "$REGION" \
-  --query "ServiceSummaryList[?ServiceName=='$AR_SERVICE'].ServiceArn" \
-  --output text 2>/dev/null)
+EC2_PUBLIC_DNS=$(aws ec2 describe-instances \
+  --instance-ids "$EC2_INSTANCE_ID" --region "$REGION" \
+  --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
+ok "EC2 public DNS: $EC2_PUBLIC_DNS"
+save_state "EC2_PUBLIC_DNS" "$EC2_PUBLIC_DNS"
 
-JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+# Wait for instance to register with the ECS cluster
+echo "   Waiting for EC2 to register with ECS cluster..."
+for i in $(seq 1 12); do
+  COUNT=$(aws ecs list-container-instances \
+    --cluster "$ECS_CLUSTER" --region "$REGION" \
+    --query 'length(containerInstanceArns)' --output text 2>/dev/null || echo 0)
+  echo "     Attempt $i/12 — registered instances: $COUNT"
+  [[ "$COUNT" -ge 1 ]] && break
+  sleep 15
+done
 
-if [[ -z "$AR_SERVICE_ARN" ]]; then
+step "Phase 5f — ECS task definition"
+JWT_SECRET=$(load_state "JWT_SECRET")
+[[ -z "$JWT_SECRET" ]] && JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+save_state "JWT_SECRET" "$JWT_SECRET"
+
+TASK_DEF_ARN=$(aws ecs register-task-definition \
+  --family "$ECS_TASK_FAMILY" \
+  --requires-compatibilities EC2 \
+  --network-mode bridge \
+  --execution-role-arn "$ECS_EXEC_ROLE_ARN" \
+  --container-definitions "[{
+    \"name\": \"backend\",
+    \"image\": \"${ECR_URI}:latest\",
+    \"essential\": true,
+    \"portMappings\": [{
+      \"containerPort\": 8000,
+      \"hostPort\": 80,
+      \"protocol\": \"tcp\"
+    }],
+    \"environment\": [
+      {\"name\": \"DATABASE_URL\",    \"value\": \"${DATABASE_URL}\"},
+      {\"name\": \"JWT_SECRET\",      \"value\": \"${JWT_SECRET}\"},
+      {\"name\": \"JWT_EXPIRES_DAYS\",\"value\": \"7\"},
+      {\"name\": \"PORT\",            \"value\": \"8000\"},
+      {\"name\": \"CORS_ORIGINS\",    \"value\": \"*\"}
+    ],
+    \"logConfiguration\": {
+      \"logDriver\": \"awslogs\",
+      \"options\": {
+        \"awslogs-group\": \"${LOG_GROUP}\",
+        \"awslogs-region\": \"${REGION}\",
+        \"awslogs-stream-prefix\": \"ecs\"
+      }
+    }
+  }]" \
+  --region "$REGION" \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+ok "Registered task definition: $TASK_DEF_ARN"
+save_state "TASK_DEF_ARN" "$TASK_DEF_ARN"
+
+step "Phase 5g — ECS service"
+SVC_STATUS=$(aws ecs describe-services \
+  --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --region "$REGION" \
+  --query 'services[0].status' --output text 2>/dev/null)
+
+if [[ "$SVC_STATUS" != "ACTIVE" ]]; then
   if ! $DOCKER_AVAILABLE; then
-    warn "Docker not available — App Runner service NOT created."
-    warn "Push an image to ECR first ($ECR_URI:latest), then re-run this script."
-    save_state "JWT_SECRET" "$JWT_SECRET"
+    warn "Docker not available — ECS service NOT created yet."
+    warn "Push an image to ECR first, then re-run this script."
   else
-    AR_SERVICE_ARN=$(aws apprunner create-service \
-      --service-name "$AR_SERVICE" \
-      --region "$REGION" \
-      --source-configuration "{
-        \"AuthenticationConfiguration\": {
-          \"AccessRoleArn\": \"$AR_ROLE_ARN\"
-        },
-        \"AutoDeploymentsEnabled\": false,
-        \"ImageRepository\": {
-          \"ImageIdentifier\": \"$ECR_URI:latest\",
-          \"ImageRepositoryType\": \"ECR\",
-          \"ImageConfiguration\": {
-            \"Port\": \"8000\",
-            \"RuntimeEnvironmentVariables\": {
-              \"DATABASE_URL\": \"$DATABASE_URL\",
-              \"JWT_SECRET\": \"$JWT_SECRET\",
-              \"JWT_EXPIRES_DAYS\": \"7\",
-              \"PORT\": \"8000\",
-              \"CORS_ORIGINS\": \"*\"
-            }
-          }
-        }
-      }" \
-      --instance-configuration '{"Cpu":"0.25 vCPU","Memory":"0.5 GB"}' \
-      --network-configuration "{
-        \"EgressConfiguration\": {
-          \"EgressType\": \"VPC\",
-          \"VpcConnectorArn\": \"$VPC_CONNECTOR_ARN\"
-        }
-      }" \
-      --query 'Service.ServiceArn' --output text)
-    save_state "JWT_SECRET" "$JWT_SECRET"
-    ok "Created App Runner service: $AR_SERVICE_ARN"
-    ok "Waiting for App Runner service to reach RUNNING..."
-    for i in $(seq 1 30); do
-      AR_STATUS=$(aws apprunner describe-service \
-        --service-arn "$AR_SERVICE_ARN" --region "$REGION" \
-        --query 'Service.Status' --output text)
-      echo "     Attempt $i/30 — status: $AR_STATUS"
-      [[ "$AR_STATUS" == "RUNNING" ]] && break
-      [[ "$AR_STATUS" == "CREATE_FAILED" ]] && die "App Runner creation failed."
-      sleep 20
-    done
+    aws ecs create-service \
+      --cluster "$ECS_CLUSTER" \
+      --service-name "$ECS_SERVICE" \
+      --task-definition "$TASK_DEF_ARN" \
+      --desired-count 1 \
+      --launch-type EC2 \
+      --region "$REGION" > /dev/null
+    ok "Created ECS service: $ECS_SERVICE"
+
+    echo "   Waiting for service to reach ACTIVE with 1 running task..."
+    aws ecs wait services-stable \
+      --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --region "$REGION"
+    ok "ECS service is stable"
   fi
 else
-  ok "App Runner service exists: $AR_SERVICE_ARN"
-  JWT_SECRET=$(load_state "JWT_SECRET")
+  ok "ECS service exists: $ECS_SERVICE"
 fi
-save_state "AR_SERVICE_ARN" "$AR_SERVICE_ARN"
-
-AR_URL=$(aws apprunner describe-service \
-  --service-arn "$AR_SERVICE_ARN" --region "$REGION" \
-  --query 'Service.ServiceUrl' --output text 2>/dev/null || echo "")
-save_state "AR_URL" "https://$AR_URL"
+save_state "ECS_CLUSTER"     "$ECS_CLUSTER"
+save_state "ECS_SERVICE"     "$ECS_SERVICE"
+save_state "ECS_TASK_FAMILY" "$ECS_TASK_FAMILY"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 6 — CloudFront OAC + distribution
@@ -445,7 +496,6 @@ CF_ID=$(aws cloudfront list-distributions \
   --output text 2>/dev/null)
 
 if [[ -z "$CF_ID" || "$CF_ID" == "None" ]]; then
-  # Create Origin Access Control
   OAC_ID=$(aws cloudfront create-origin-access-control \
     --origin-access-control-config "{
       \"Name\": \"${PROJECT}-oac\",
@@ -457,63 +507,45 @@ if [[ -z "$CF_ID" || "$CF_ID" == "None" ]]; then
     --query 'OriginAccessControl.Id' --output text)
   ok "Created OAC: $OAC_ID"
 
-  S3_ORIGIN_DOMAIN="${S3_BUCKET}.s3.${REGION}.amazonaws.com"
-  CALLER_REF="$(date +%s)"
-
   CF_ID=$(aws cloudfront create-distribution \
     --distribution-config "{
-      \"CallerReference\": \"$CALLER_REF\",
+      \"CallerReference\": \"$(date +%s)\",
       \"Comment\": \"$PROJECT frontend\",
       \"DefaultRootObject\": \"index.html\",
-      \"Origins\": {
-        \"Quantity\": 1,
-        \"Items\": [{
-          \"Id\": \"s3-origin\",
-          \"DomainName\": \"$S3_ORIGIN_DOMAIN\",
-          \"S3OriginConfig\": {\"OriginAccessIdentity\": \"\"},
-          \"OriginAccessControlId\": \"$OAC_ID\"
-        }]
-      },
+      \"Origins\": {\"Quantity\": 1, \"Items\": [{
+        \"Id\": \"s3-origin\",
+        \"DomainName\": \"${S3_BUCKET}.s3.${REGION}.amazonaws.com\",
+        \"S3OriginConfig\": {\"OriginAccessIdentity\": \"\"},
+        \"OriginAccessControlId\": \"$OAC_ID\"
+      }]},
       \"DefaultCacheBehavior\": {
         \"TargetOriginId\": \"s3-origin\",
         \"ViewerProtocolPolicy\": \"redirect-to-https\",
         \"AllowedMethods\": {\"Quantity\": 2, \"Items\": [\"GET\",\"HEAD\"]},
         \"CachedMethods\":  {\"Quantity\": 2, \"Items\": [\"GET\",\"HEAD\"]},
-        \"ForwardedValues\": {
-          \"QueryString\": false,
-          \"Cookies\": {\"Forward\": \"none\"}
-        },
+        \"ForwardedValues\": {\"QueryString\": false, \"Cookies\": {\"Forward\": \"none\"}},
         \"MinTTL\": 0
       },
-      \"CustomErrorResponses\": {
-        \"Quantity\": 1,
-        \"Items\": [{
-          \"ErrorCode\": 403,
-          \"ResponsePagePath\": \"/index.html\",
-          \"ResponseCode\": \"200\",
-          \"ErrorCachingMinTTL\": 0
-        }]
-      },
+      \"CustomErrorResponses\": {\"Quantity\": 1, \"Items\": [{
+        \"ErrorCode\": 403, \"ResponsePagePath\": \"/index.html\",
+        \"ResponseCode\": \"200\", \"ErrorCachingMinTTL\": 0
+      }]},
       \"Enabled\": true,
       \"PriceClass\": \"PriceClass_100\"
     }" \
     --query 'Distribution.Id' --output text)
   ok "Created CloudFront distribution: $CF_ID"
 
-  # Attach bucket policy for OAC
   aws s3api put-bucket-policy --bucket "$S3_BUCKET" --policy "{
     \"Version\": \"2012-10-17\",
     \"Statement\": [{
-      \"Sid\": \"AllowCloudFrontOAC\",
       \"Effect\": \"Allow\",
       \"Principal\": {\"Service\": \"cloudfront.amazonaws.com\"},
       \"Action\": \"s3:GetObject\",
-      \"Resource\": \"arn:aws:s3:::$S3_BUCKET/*\",
-      \"Condition\": {
-        \"StringEquals\": {
-          \"AWS:SourceArn\": \"arn:aws:cloudfront::$ACCOUNT:distribution/$CF_ID\"
-        }
-      }
+      \"Resource\": \"arn:aws:s3:::${S3_BUCKET}/*\",
+      \"Condition\": {\"StringEquals\": {
+        \"AWS:SourceArn\": \"arn:aws:cloudfront::${ACCOUNT}:distribution/${CF_ID}\"
+      }}
     }]
   }"
   ok "S3 bucket policy updated for CloudFront OAC"
@@ -528,30 +560,32 @@ save_state "CF_DOMAIN" "https://$CF_DOMAIN"
 ok "CloudFront domain: https://$CF_DOMAIN"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE 7 — Update App Runner CORS_ORIGINS → CloudFront URL
+# PHASE 7 — Update ECS task definition CORS_ORIGINS → CloudFront URL
 # ─────────────────────────────────────────────────────────────────────────────
-if [[ -n "$AR_SERVICE_ARN" ]]; then
-  step "Phase 7 — Update App Runner CORS_ORIGINS"
-  aws apprunner update-service \
-    --service-arn "$AR_SERVICE_ARN" --region "$REGION" \
-    --source-configuration "{
-      \"ImageRepository\": {
-        \"ImageIdentifier\": \"$ECR_URI:latest\",
-        \"ImageRepositoryType\": \"ECR\",
-        \"ImageConfiguration\": {
-          \"Port\": \"8000\",
-          \"RuntimeEnvironmentVariables\": {
-            \"DATABASE_URL\": \"$DATABASE_URL\",
-            \"JWT_SECRET\": \"$JWT_SECRET\",
-            \"JWT_EXPIRES_DAYS\": \"7\",
-            \"PORT\": \"8000\",
-            \"CORS_ORIGINS\": \"https://$CF_DOMAIN\"
-          }
-        }
-      }
-    }" > /dev/null
-  ok "CORS_ORIGINS updated to https://$CF_DOMAIN"
-fi
+step "Phase 7 — Update CORS_ORIGINS in ECS task definition"
+NEW_TASK_DEF=$(aws ecs describe-task-definition \
+  --task-definition "$ECS_TASK_FAMILY" --region "$REGION" \
+  --query 'taskDefinition' --output json \
+| python3 -c "
+import sys, json
+td = json.load(sys.stdin)
+for env in td['containerDefinitions'][0]['environment']:
+    if env['name'] == 'CORS_ORIGINS':
+        env['value'] = 'https://$CF_DOMAIN'
+for k in ['taskDefinitionArn','revision','status','requiresAttributes',
+          'compatibilities','registeredAt','registeredBy']:
+    td.pop(k, None)
+print(json.dumps(td))
+")
+
+UPDATED_ARN=$(aws ecs register-task-definition \
+  --cli-input-json "$NEW_TASK_DEF" --region "$REGION" \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+
+aws ecs update-service \
+  --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+  --task-definition "$UPDATED_ARN" --region "$REGION" > /dev/null
+ok "CORS_ORIGINS set to https://$CF_DOMAIN — new task revision: $UPDATED_ARN"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 8 — GitHub Secrets summary
@@ -562,16 +596,19 @@ printf "${BLD}  Provisioning complete. Add these GitHub Secrets:${RST}\n"
 printf "  GitHub → Settings → Secrets and variables → Actions\n"
 hr
 printf "\n  %-35s  %s\n" "Secret" "Value"
-printf "  %-35s  %s\n"   "──────────────────────────────────" "─────────────────────────────────────────"
-printf "  %-35s  %s\n"   "AWS_ACCESS_KEY_ID"               "<IAM user key — not role credentials>"
+printf "  %-35s  %s\n"   "──────────────────────────────────" "──────────────────────────────────────────"
+printf "  %-35s  %s\n"   "AWS_ACCESS_KEY_ID"               "<IAM user key>"
 printf "  %-35s  %s\n"   "AWS_SECRET_ACCESS_KEY"           "<IAM user secret>"
 printf "  %-35s  %s\n"   "AWS_REGION"                      "$REGION"
 printf "  %-35s  %s\n"   "ECR_REGISTRY"                    "$ECR_REGISTRY"
 printf "  %-35s  %s\n"   "ECR_REPOSITORY"                  "$ECR_REPO"
-printf "  %-35s  %s\n"   "APP_RUNNER_SERVICE_ARN"          "${AR_SERVICE_ARN:-<not yet created>}"
+printf "  %-35s  %s\n"   "ECS_CLUSTER"                     "$ECS_CLUSTER"
+printf "  %-35s  %s\n"   "ECS_SERVICE"                     "$ECS_SERVICE"
+printf "  %-35s  %s\n"   "ECS_TASK_FAMILY"                 "$ECS_TASK_FAMILY"
 printf "  %-35s  %s\n"   "S3_BUCKET"                       "$S3_BUCKET"
 printf "  %-35s  %s\n"   "CLOUDFRONT_DISTRIBUTION_ID"      "${CF_ID:-<not yet created>}"
-printf "  %-35s  %s\n"   "VITE_API_BASE_URL"               "https://${AR_URL:-<App Runner URL>}/api/v1"
+printf "  %-35s  %s\n"   "VITE_API_BASE_URL"               "http://${EC2_PUBLIC_DNS}/api/v1"
 echo
-warn "Sensitive values saved locally to .aws-state.env — do NOT commit that file."
+warn "Sensitive values (DB password, JWT secret) saved to .aws-state.env — do NOT commit."
+warn "EC2 public DNS changes if the instance is stopped/started — use an Elastic IP to fix it."
 hr
