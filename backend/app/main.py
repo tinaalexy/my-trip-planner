@@ -16,3 +16,8 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(trips.router)
 app.include_router(activities.router)
+
+
+@app.get("/health", tags=["health"])
+def health():
+    return {"status": "ok"}

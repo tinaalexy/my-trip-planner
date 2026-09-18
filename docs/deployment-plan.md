@@ -192,18 +192,61 @@ Go back to App Runner → update `CORS_ORIGINS` to `https://d1abc.cloudfront.net
 
 ---
 
-## 4. Redeployment Workflow (after first deploy)
+## 4. GitHub Secrets (required before CD pipeline works)
+
+Set these in **GitHub → Settings → Secrets and variables → Actions**:
+
+| Secret | Where to find it |
+|--------|-----------------|
+| `AWS_ACCESS_KEY_ID` | IAM user with the permissions below |
+| `AWS_SECRET_ACCESS_KEY` | Same IAM user |
+| `AWS_REGION` | e.g. `eu-west-1` |
+| `ECR_REGISTRY` | `<account-id>.dkr.ecr.<region>.amazonaws.com` |
+| `ECR_REPOSITORY` | `my-trip-advisor-backend` |
+| `APP_RUNNER_SERVICE_ARN` | App Runner console → service → ARN |
+| `S3_BUCKET` | e.g. `my-trip-advisor-frontend` |
+| `CLOUDFRONT_DISTRIBUTION_ID` | CloudFront console → distribution ID |
+| `VITE_API_BASE_URL` | App Runner service URL + `/api/v1` |
+
+**Minimum IAM permissions** for the CD user:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "ecr:GetAuthorizationToken",
+    "ecr:BatchCheckLayerAvailability",
+    "ecr:InitiateLayerUpload",
+    "ecr:UploadLayerPart",
+    "ecr:CompleteLayerUpload",
+    "ecr:PutImage",
+    "apprunner:StartDeployment",
+    "apprunner:DescribeService",
+    "s3:PutObject",
+    "s3:DeleteObject",
+    "s3:ListBucket",
+    "cloudfront:CreateInvalidation"
+  ],
+  "Resource": "*"
+}
+```
+
+---
+
+## 5. Redeployment Workflow (automated via CD pipeline)
+
+Every push to `main` that passes CI automatically:
+
+1. **Backend** — builds Docker image, tags with git SHA + `latest`, pushes to ECR, triggers App Runner deployment, waits for it to go live, smoke-tests `/health`
+2. **Frontend** — builds React app with `VITE_API_BASE_URL`, syncs `dist/` to S3, invalidates CloudFront cache
+
+Manual override if needed:
 
 ```bash
-# Rebuild and push new image
-docker build -t my-trip-advisor-backend ./backend
-docker tag my-trip-advisor-backend:latest <ecr-uri>:latest
-docker push <ecr-uri>:latest
-
-# Trigger App Runner to pull the new image
+# Force a backend redeploy from the current ECR image
 aws apprunner start-deployment --service-arn <service-arn>
 
-# Redeploy frontend (if changed)
+# Force a frontend redeploy
 cd frontend && npm run build
 aws s3 sync dist/ s3://my-trip-advisor-frontend --delete
 aws cloudfront create-invalidation --distribution-id <dist-id> --paths "/*"
@@ -211,7 +254,7 @@ aws cloudfront create-invalidation --distribution-id <dist-id> --paths "/*"
 
 ---
 
-## 5. Verification Checklist
+## 6. Verification Checklist
 
 - [ ] `alembic upgrade head` runs without errors against local SQLite
 - [ ] `docker build -t test ./backend` exits 0
