@@ -40,7 +40,14 @@ step "Backend — pytest"
   export JWT_SECRET="test-secret-key-min-32-characters-long"
   export JWT_EXPIRES_DAYS="1"
   export CORS_ORIGINS="http://localhost:5173"
-  python -m pytest --tb=short -q 2>&1
+  # Prefer the project venv if it exists; fall back to system Python
+  PYTHON="python"
+  if [ -f ".venv/Scripts/python" ]; then
+    PYTHON=".venv/Scripts/python"
+  elif [ -f ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+  fi
+  "$PYTHON" -m pytest --tb=short -q 2>&1
 ) && ok "All backend tests passed" || err "Backend tests failed"
 
 # ── BACKEND SECURITY ──────────────────────────────────────────────────────────
