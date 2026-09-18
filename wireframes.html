@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>My Trip Planner — Wireframes</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #e8e8e8;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+      color: #333;
+      padding: 40px 20px;
+    }
+    .screen-wrapper {
+      margin-bottom: 60px;
+    }
+    .screen-label {
+      font-size: 11px;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #888;
+      margin-bottom: 8px;
+    }
+    .screen {
+      background: #f5f5f5;
+      border: 2px solid #ccc;
+      border-radius: 6px;
+      max-width: 680px;
+      overflow: hidden;
+    }
+
+    /* NAV */
+    .nav {
+      background: #ddd;
+      border-bottom: 2px solid #bbb;
+      padding: 10px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav-brand {
+      font-weight: bold;
+      font-size: 15px;
+      color: #444;
+    }
+    .nav-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .nav-link {
+      color: #5b8dd9;
+      font-size: 13px;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .nav-username {
+      font-size: 12px;
+      color: #666;
+      background: #ccc;
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    .nav-logout {
+      font-size: 12px;
+      background: #bbb;
+      border: 1px solid #999;
+      border-radius: 4px;
+      padding: 3px 10px;
+      color: #444;
+      cursor: pointer;
+    }
+
+    /* PAGE BODY */
+    .page-body {
+      padding: 28px 28px;
+    }
+
+    /* AUTH SCREENS */
+    .auth-screen {
+      padding: 40px 28px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .auth-app-name {
+      font-size: 20px;
+      font-weight: bold;
+      color: #444;
+      margin-bottom: 28px;
+    }
+    .auth-form {
+      width: 100%;
+      max-width: 340px;
+      background: #ececec;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 24px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .form-title {
+      font-size: 16px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 4px;
+    }
+    .field-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .field-label {
+      font-size: 12px;
+      color: #555;
+      font-weight: bold;
+    }
+    .field-input {
+      background: #fff;
+      border: 1px dashed #aaa;
+      border-radius: 4px;
+      padding: 7px 10px;
+      font-size: 13px;
+      color: #999;
+    }
+    .field-input.filled {
+      color: #333;
+      border-style: solid;
+      border-color: #bbb;
+    }
+    .btn-primary {
+      background: #5b8dd9;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 9px 16px;
+      font-size: 13px;
+      font-weight: bold;
+      cursor: pointer;
+      text-align: center;
+    }
+    .btn-secondary {
+      background: #e0e0e0;
+      color: #555;
+      border: 1px solid #bbb;
+      border-radius: 4px;
+      padding: 9px 16px;
+      font-size: 13px;
+      cursor: pointer;
+      text-align: center;
+    }
+    .btn-danger {
+      background: #e57373;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 5px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-small {
+      background: #e0e0e0;
+      color: #444;
+      border: 1px solid #bbb;
+      border-radius: 4px;
+      padding: 3px 9px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-small-primary {
+      background: #5b8dd9;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 3px 9px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn-success {
+      background: #5aab6e;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    .auth-link {
+      text-align: center;
+      font-size: 12px;
+      color: #888;
+      margin-top: 4px;
+    }
+    .auth-link a {
+      color: #5b8dd9;
+    }
+
+    /* WARNING BANNER */
+    .warning-banner {
+      width: 100%;
+      max-width: 340px;
+      background: #fff8d6;
+      border: 1px solid #e6cc6a;
+      border-radius: 4px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: #7a5f00;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+
+    /* PAGE HEADING ROW */
+    .page-heading-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .page-heading {
+      font-size: 20px;
+      font-weight: bold;
+      color: #333;
+    }
+
+    /* EMPTY STATE */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 20px;
+      color: #aaa;
+      gap: 10px;
+    }
+    .empty-icon {
+      font-size: 36px;
+      opacity: 0.4;
+    }
+    .empty-text {
+      font-size: 15px;
+      color: #bbb;
+    }
+    .empty-cta {
+      margin-top: 8px;
+    }
+
+    /* TRIP CARD GRID */
+    .card-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .trip-card {
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .trip-card-destination {
+      font-size: 15px;
+      font-weight: bold;
+      color: #333;
+    }
+    .trip-card-dates {
+      font-size: 12px;
+      color: #777;
+    }
+    .trip-card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 4px;
+    }
+    .badge {
+      background: #d6e8ff;
+      color: #3a6bbf;
+      font-size: 11px;
+      font-weight: bold;
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    /* CREATE TRIP FORM */
+    .date-row {
+      display: flex;
+      gap: 14px;
+    }
+    .date-row .field-group {
+      flex: 1;
+    }
+    .trip-type-group {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .type-btn {
+      background: #e8e8e8;
+      border: 1px solid #bbb;
+      border-radius: 4px;
+      padding: 6px 12px;
+      font-size: 12px;
+      color: #555;
+      cursor: pointer;
+    }
+    .type-btn.selected {
+      background: #5b8dd9;
+      color: #fff;
+      border-color: #4a79c0;
+    }
+    .form-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 4px;
+    }
+
+    /* ITINERARY */
+    .trip-header-block {
+      background: #e8eff7;
+      border: 1px solid #c0d0e8;
+      border-radius: 6px;
+      padding: 16px 18px;
+      margin-bottom: 12px;
+    }
+    .trip-header-dest {
+      font-size: 20px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 6px;
+    }
+    .trip-header-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: #666;
+    }
+    .export-row {
+      margin-bottom: 18px;
+    }
+    .day-panel {
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    .day-panel-header {
+      background: #e8e8e8;
+      border-bottom: 1px solid #ccc;
+      padding: 8px 14px;
+      font-weight: bold;
+      font-size: 13px;
+      color: #444;
+    }
+    .day-panel-body {
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .activity-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 8px;
+      background: #f9f9f9;
+      border: 1px solid #e4e4e4;
+      border-radius: 4px;
+    }
+    .activity-text {
+      font-size: 13px;
+      color: #333;
+    }
+    .activity-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .activity-input-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 2px;
+    }
+    .activity-input-row .field-input {
+      flex: 1;
+    }
+    .no-activities {
+      font-size: 12px;
+      color: #bbb;
+      font-style: italic;
+      padding: 4px 0;
+    }
+    .edit-mode-block {
+      background: #f0f4fb;
+      border: 1px solid #c0d0e8;
+      border-radius: 4px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .edit-mode-input {
+      background: #fff;
+      border: 1px solid #5b8dd9;
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-size: 13px;
+      color: #333;
+      width: 100%;
+    }
+    .edit-mode-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    /* DIVIDER */
+    .section-divider {
+      border: none;
+      border-top: 1px dashed #ccc;
+      margin: 8px 0;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- SCREEN 1: Login                                -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="screen-wrapper">
+    <div class="screen-label">Screen 1 of 7 — /login</div>
+    <div class="screen">
+      <div class="auth-screen">
+        <div class="auth-app-name">✈ My Trip Planner</div>
+        <div class="auth-form">
+          <div class="form-title">Log In</div>
+          <div class="field-group">
+            <div class="field-label">Username</div>
+            <div class="field-input">username</div>
+          </div>
+          <div class="field-group">
+            <div class="field-label">Password</div>
+            <div class="field-input">••••••••</div>
+          </div>
+          <div class="btn-primary">Log In</div>
+          <div class="auth-link">Don't have an account? <a href="#">Sign up</a></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- SCREEN 2: Login — session expired              -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="screen-wrapper">
+    <div class="screen-label">Screen 2 of 7 — /login?expired=1</div>
+    <div class="screen">
+      <div class="auth-screen">
+        <div class="auth-app-name">✈ My Trip Planner</div>
+        <div class="warning-banner">⚠ Your session has expired, please log in again.</div>
+        <div class="auth-form">
+          <div class="form-title">Log In</div>
+          <div class="field-group">
+            <div class="field-label">Username</div>
+            <div class="field-input">username</div>
+          </div>
+          <div class="field-group">
+            <div class="field-label">Password</div>
+            <div class="field-input">••••••••</div>
+          </div>
+          <div class="btn-primary">Log In</div>
+          <div class="auth-link">Don't have an account? <a href="#">Sign up</a></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- SCREEN 3: Sign Up                              -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="screen-wrapper">
+    <div class="screen-label">Screen 3 of 7 — /signup</div>
+    <div class="screen">
+      <div class="auth-screen">
+        <div class="auth-app-name">✈ My Trip Planner</div>
+        <div class="auth-form">
+          <div class="form-title">Create an Account</div>
+          <div class="field-group">
+            <div class="field-label">Username</div>
+            <div class="field-input">3–30 chars, letters/digits/underscores</div>
+          </div>
+          <div class="field-group">
+            <div class="field-label">Password</div>
+            <div class="field-input">min 8 characters</div>
+          </div>
+          <div class="field-group">
+            <div class="field-label">Confirm Password</div>
+            <div class="field-input">repeat password</div>
+          </div>
+          <div class="btn-primary">Sign Up</div>
+          <div class="auth-link">Already have an account? <a href="#">Log in</a></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- SCREEN 4: My Trips (empty)                     -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="screen-wrapper">
+    <div class="screen-label">Screen 4 of 7 — /trips (empty state)</div>
+    <div class="screen">
+      <div class="nav">
+        <div class="nav-brand">✈ My Trip Planner</div>
+        <div class="nav-right">
+          <span class="nav-link">My Trips</span>
+          <span class="nav-username">@alice</span>
+          <span class="nav-logout">Logout</span>
+        </div>
+      </div>
+      <div class="page-body">
+        <div class="page-heading-row">
+          <div class="page-heading">My Trips</div>
+          <div class="btn-primary" style="font-size:13px; padding:7px 14px;">+ New Trip</div>
+        </div>
+        <div class="empty-state">
+          <div class="empty-icon">🗺</div>
+          <div class="empty-text">No trips yet</div>
+          <div class="empty-cta">
+            <div class="btn-primary">Create your first trip</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- SCREEN 5: My Trips (with trips)                -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="screen-wrapper">
+    <div class="screen-label">Screen 5 of 7 — /trips (with trips)</div>
+    <div class="screen">
+      <div class="nav">
+        <div class="nav-brand">✈ My Trip Planner</div>
+        <div class="nav-right">
+          <span class="nav-link">My Trips</span>
+          <span class="nav-username">@alice</span>
+          <span class="nav-logout">Logout</span>
+        </div>
+      </div>
+      <div class="page-body">
+        <div class="page-heading-row">
+          <div class="page-heading">My Trips</div>
+          <div class="btn-primary" style="font-size:13px; padding:7px 14px;">+ New Trip</div>
+        </div>
+        <div class="card-grid">
+
+          <div class="trip-card">
+            <div class="trip-card-destination">Paris</div>
+            <div class="trip-card-dates">15 June 2024 – 22 June 2024</div>
+            <div class="trip-card-footer">
+              <span class="badge">Couple</span>
+              <span class="btn-danger">Delete</span>
+            </div>
+          </div>
+
+          <div class="trip-card">
+            <div class="trip-card-destination">Tokyo</div>
+            <div class="trip-card-dates">10 October 2024 – 24 October 2024</div>
+            <div class="trip-card-footer">
+              <span class="badge">Solo</span>
+              <span class="btn-danger">Delete</span>
+            </div>
+          </div>
+
+          <div class="trip-card">
+            <div class="trip-card-destination">New York City</div>
+            <div class="trip-card-dates">20 December 2024 – 27 December 2024</div>
+            <div class="trip-card-footer">
+              <span class="badge">Family</span>
+              <span class="btn-danger">Delete</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- SCREEN 6: Create Trip                          -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="screen-wrapper">
+    <div class="screen-label">Screen 6 of 7 — /trips/new</div>
+    <div class="screen">
+      <div class="nav">
+        <div class="nav-brand">✈ My Trip Planner</div>
+        <div class="nav-right">
+          <span class="nav-link">My Trips</span>
+          <span class="nav-username">@alice</span>
+          <span class="nav-logout">Logout</span>
+        </div>
+      </div>
+      <div class="page-body">
+        <div style="margin-bottom:20px;">
+          <div class="page-heading">Create a New Trip</div>
+        </div>
+        <div style="display:flex; flex-direction:column; gap:16px; max-width:480px;">
+
+          <div class="field-group">
+            <div class="field-label">Destination</div>
+            <div class="field-input">e.g. Paris, France</div>
+          </div>
+
+          <div class="date-row">
+            <div class="field-group">
+              <div class="field-label">Start Date</div>
+              <div class="field-input">DD / MM / YYYY</div>
+            </div>
+            <div class="field-group">
+              <div class="field-label">End Date</div>
+              <div class="field-input">DD / MM / YYYY</div>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <div class="field-label">Trip Type</div>
+            <div class="trip-type-group" style="margin-top:6px;">
+              <span class="type-btn selected">Solo</span>
+              <span class="type-btn">Couple</span>
+              <span class="type-btn">Family</span>
+              <span class="type-btn">Group of Friends</span>
+            </div>
+          </div>
+
+          <hr class="section-divider" />
+
+          <div class="form-actions">
+            <div class="btn-primary" style="flex:1; text-align:center; padding:10px;">Create Trip</div>
+            <div class="btn-secondary" style="flex:1; text-align:center; padding:10px;">Cancel</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- SCREEN 7: Trip Itinerary                       -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="screen-wrapper">
+    <div class="screen-label">Screen 7 of 7 — /trips/:tripId</div>
+    <div class="screen">
+      <div class="nav">
+        <div class="nav-brand">✈ My Trip Planner</div>
+        <div class="nav-right">
+          <span class="nav-link">My Trips</span>
+          <span class="nav-username">@alice</span>
+          <span class="nav-logout">Logout</span>
+        </div>
+      </div>
+      <div class="page-body">
+
+        <!-- TripHeader -->
+        <div class="trip-header-block">
+          <div class="trip-header-dest">Paris</div>
+          <div class="trip-header-meta">
+            <span>15 June 2024 – 22 June 2024</span>
+            <span class="badge">Couple</span>
+          </div>
+        </div>
+
+        <!-- Export Button -->
+        <div class="export-row">
+          <div class="btn-success">⬇ Export PDF</div>
+        </div>
+
+        <!-- ─── #itinerary-print-area begins here ─── -->
+
+        <!-- Day 1 — two activities -->
+        <div class="day-panel">
+          <div class="day-panel-header">Day 1 – Saturday, 15 June 2024</div>
+          <div class="day-panel-body">
+
+            <div class="activity-row">
+              <span class="activity-text">Visit the Eiffel Tower</span>
+              <div class="activity-actions">
+                <span class="btn-small">Edit</span>
+                <span class="btn-danger" style="padding:3px 8px; font-size:12px;">Delete</span>
+              </div>
+            </div>
+
+            <div class="activity-row">
+              <span class="activity-text">Lunch at Le Marais</span>
+              <div class="activity-actions">
+                <span class="btn-small">Edit</span>
+                <span class="btn-danger" style="padding:3px 8px; font-size:12px;">Delete</span>
+              </div>
+            </div>
+
+            <hr class="section-divider" />
+            <div class="activity-input-row">
+              <div class="field-input" style="flex:1;">Add an activity…</div>
+              <div class="btn-small-primary" style="padding:6px 14px; font-size:13px;">Add</div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Day 2 — edit mode -->
+        <div class="day-panel">
+          <div class="day-panel-header">Day 2 – Sunday, 16 June 2024</div>
+          <div class="day-panel-body">
+
+            <div class="edit-mode-block">
+              <div class="field-label" style="font-size:11px; color:#5b8dd9;">Editing activity</div>
+              <input class="edit-mode-input" type="text" value="Louvre Museum" readonly />
+              <div class="edit-mode-actions">
+                <span class="btn-small-primary">Save</span>
+                <span class="btn-small">Cancel</span>
+              </div>
+            </div>
+
+            <hr class="section-divider" />
+            <div class="activity-input-row">
+              <div class="field-input" style="flex:1;">Add an activity…</div>
+              <div class="btn-small-primary" style="padding:6px 14px; font-size:13px;">Add</div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Day 3 — empty -->
+        <div class="day-panel">
+          <div class="day-panel-header">Day 3 – Monday, 17 June 2024</div>
+          <div class="day-panel-body">
+
+            <div class="no-activities">No activities yet</div>
+
+            <hr class="section-divider" />
+            <div class="activity-input-row">
+              <div class="field-input" style="flex:1;">Add an activity…</div>
+              <div class="btn-small-primary" style="padding:6px 14px; font-size:13px;">Add</div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ─── #itinerary-print-area ends here ─── -->
+
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
