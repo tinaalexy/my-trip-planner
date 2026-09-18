@@ -1,0 +1,488 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  my-trip-advisor — ECR, S3 + CloudFront, RDS PostgreSQL,
+  ECS/EC2 with Elastic IP, Secrets Manager, GitHub OIDC.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameters
+# ─────────────────────────────────────────────────────────────────────────────
+Parameters:
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Default VPC (queried by aws-provision.sh)
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two subnets in different AZs (required by RDS)
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    ConstraintDescription: At least 8 alphanumeric characters
+
+  JWTSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    ConstraintDescription: At least 32 characters
+
+  GitHubRepo:
+    Type: String
+    Default: ""
+    Description: >
+      owner/repo for GitHub Actions OIDC (e.g. tinaalexy/my-trip-planner).
+      Leave empty to skip OIDC setup — use access keys in GitHub Secrets instead.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conditions
+# ─────────────────────────────────────────────────────────────────────────────
+Conditions:
+  EnableGitHubOIDC: !Not [!Equals [!Ref GitHubRepo, ""]]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resources
+# ─────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── ECR ────────────────────────────────────────────────────────────────────
+  BackendRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: my-trip-advisor-backend
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep last 10 images",
+              "selection": {
+                "tagStatus": "any",
+                "countType": "imageCountMoreThan",
+                "countNumber": 10
+              },
+              "action": { "type": "expire" }
+            }]
+          }
+
+  # ── S3 ─────────────────────────────────────────────────────────────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # AccountId suffix ensures global uniqueness
+      BucketName: !Sub "my-trip-advisor-frontend-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ── CloudFront ─────────────────────────────────────────────────────────────
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: my-trip-advisor-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+        Description: OAC for my-trip-advisor S3 bucket
+
+  # Bucket policy must reference the distribution — CF infers the order
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub
+                  - "arn:aws:cloudfront::${AWS::AccountId}:distribution/${DistId}"
+                  - DistId: !Ref CloudFrontDistribution
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: my-trip-advisor frontend
+        DefaultRootObject: index.html
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: s3-origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !Ref CloudFrontOAC
+        DefaultCacheBehavior:
+          TargetOriginId: s3-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          MinTTL: 0
+        # Return index.html for any 403 (S3 path not found) so React Router works
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponsePagePath: /index.html
+            ResponseCode: 200
+            ErrorCachingMinTTL: 0
+
+  # ── Security Groups ─────────────────────────────────────────────────────────
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS EC2 host — HTTP port 80 public
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: my-trip-advisor-ec2-sg
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS PostgreSQL — port 5432 from ECS EC2 only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: my-trip-advisor-rds-sg
+
+  # ── RDS ────────────────────────────────────────────────────────────────────
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for my-trip-advisor RDS
+      SubnetIds: !Ref SubnetIds
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: my-trip-advisor-db
+      DBInstanceClass: db.t3.micro
+      Engine: postgres
+      EngineVersion: "16.3"
+      MasterUsername: tripuser
+      MasterUserPassword: !Ref DBPassword
+      DBName: tripplanner
+      AllocatedStorage: "20"
+      StorageType: gp2
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      DeletionProtection: false
+
+  # ── Secrets Manager ─────────────────────────────────────────────────────────
+  # Secrets are injected into ECS containers at runtime — never in task def plaintext
+  DBConnectionStringSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${AWS::StackName}/database-url"
+      Description: PostgreSQL connection string for the backend
+      SecretString:
+        Fn::Join:
+          - ""
+          - - "postgresql://tripuser:"
+            - !Ref DBPassword
+            - "@"
+            - !GetAtt Database.Endpoint.Address
+            - ":5432/tripplanner"
+
+  AppJWTSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${AWS::StackName}/jwt-secret"
+      Description: JWT signing secret for the backend
+      SecretString: !Ref JWTSecret
+
+  # ── IAM ────────────────────────────────────────────────────────────────────
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-ecs-execution"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DBConnectionStringSecret
+                  - !Ref AppJWTSecret
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-ec2-instance"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${AWS::StackName}-ec2-profile"
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # GitHub Actions OIDC — only created when GitHubRepo is provided.
+  # Allows GitHub Actions to assume an AWS role without storing long-term keys.
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: EnableGitHubOIDC
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Condition: EnableGitHubOIDC
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-github-actions"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOIDCProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": sts.amazonaws.com
+              StringLike:
+                "token.actions.githubusercontent.com:sub": !Sub "repo:${GitHubRepo}:*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      Policies:
+        - PolicyName: ECSAndFrontendDeploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ECS
+                Effect: Allow
+                Action:
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DescribeTaskDefinition
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                  - ecs:ListTasks
+                  - ecs:DescribeTasks
+                  - ecs:DescribeContainerInstances
+                Resource: "*"
+              - Sid: EC2Describe
+                Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: "*"
+              - Sid: S3Deploy
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt FrontendBucket.Arn
+                  - !Sub "${FrontendBucket.Arn}/*"
+              - Sid: CloudFrontInvalidate
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetDistribution
+                Resource: !Sub
+                  - "arn:aws:cloudfront::${AWS::AccountId}:distribution/${DistId}"
+                  - DistId: !Ref CloudFrontDistribution
+              - Sid: PassExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt ECSTaskExecutionRole.Arn
+
+  # ── ECS ────────────────────────────────────────────────────────────────────
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: my-trip-advisor
+
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: /ecs/my-trip-advisor-backend
+      RetentionInDays: 30
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: my-trip-advisor-backend
+      NetworkMode: bridge
+      RequiresCompatibilities:
+        - EC2
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          # Image is updated by the CD pipeline on every deploy; this sets the initial value
+          Image: !Sub "${BackendRepository.RepositoryUri}:latest"
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              HostPort: 80
+              Protocol: tcp
+          Environment:
+            - Name: PORT
+              Value: "8000"
+            - Name: JWT_EXPIRES_DAYS
+              Value: "7"
+            - Name: CORS_ORIGINS
+              Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+          # Secrets pulled from Secrets Manager at container start — never in plaintext
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Ref DBConnectionStringSecret
+            - Name: JWT_SECRET
+              ValueFrom: !Ref AppJWTSecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # ── EC2 + Elastic IP ───────────────────────────────────────────────────────
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: my-trip-advisor-eip
+
+  ECSHost:
+    Type: AWS::EC2::Instance
+    DependsOn: ECSCluster
+    Properties:
+      # Always gets the latest ECS-optimized Amazon Linux 2 AMI for the region
+      ImageId: "{{resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id}}"
+      InstanceType: t2.micro
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      SubnetId: !Select [0, !Ref SubnetIds]
+      Tags:
+        - Key: Name
+          Value: my-trip-advisor-ecs-host
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash
+            echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+
+  EIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref ECSHost
+      EIP: !Ref ElasticIP
+
+  ECSService:
+    Type: AWS::ECS::Service
+    # Wait for EC2 host to exist before creating the service
+    DependsOn:
+      - ECSHost
+      - EIPAssociation
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: my-trip-advisor-backend
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: 1
+      LaunchType: EC2
+      DeploymentConfiguration:
+        # Allow 0 healthy tasks during deploy (single EC2 instance)
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs — used by aws-provision.sh and GitHub Secrets
+# ─────────────────────────────────────────────────────────────────────────────
+Outputs:
+
+  ECRRepositoryUri:
+    Description: Push Docker images here
+    Value: !GetAtt BackendRepository.RepositoryUri
+
+  S3BucketName:
+    Description: Upload frontend dist/ to this bucket
+    Value: !Ref FrontendBucket
+
+  CloudFrontDistributionId:
+    Description: Invalidate after each S3 upload
+    Value: !Ref CloudFrontDistribution
+
+  CloudFrontDomain:
+    Description: Public frontend URL
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+
+  BackendUrl:
+    Description: Backend API base URL (stable — backed by Elastic IP)
+    Value: !Sub "http://${ElasticIP}/api/v1"
+
+  ECSClusterName:
+    Value: !Ref ECSCluster
+
+  ECSServiceName:
+    Value: !GetAtt ECSService.Name
+
+  ECSTaskFamily:
+    Value: my-trip-advisor-backend
+
+  GitHubActionsRoleArn:
+    Condition: EnableGitHubOIDC
+    Description: Use in cd.yml role-to-assume (replaces AWS_ACCESS_KEY_ID/SECRET)
+    Value: !GetAtt GitHubActionsRole.Arn
