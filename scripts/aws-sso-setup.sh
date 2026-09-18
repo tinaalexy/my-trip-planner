@@ -13,7 +13,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-PROFILE="trip-advisor"
+PROFILE="aws-free-tier"
 REGION="ap-southeast-2"
 STATE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.aws-state.env"
 
