@@ -55,13 +55,13 @@ step "Step 1 — AWS connection"
 
 PROFILE=$(load_state "AWS_PROFILE")
 REGION=$(load_state "AWS_REGION")
-[[ -z "$PROFILE" ]] && die "No AWS profile found. Run: bash scripts/aws-sso-setup.sh"
+[[ -z "$PROFILE" ]] && die "No AWS profile found. Run: aws configure --profile aws-free-tier"
 [[ -z "$REGION"  ]] && REGION="ap-southeast-2"
 export AWS_PROFILE="$PROFILE"
 export AWS_DEFAULT_REGION="$REGION"
 
 IDENTITY=$(aws sts get-caller-identity --output json 2>&1) \
-  || { err "Session expired."; echo; die "Refresh: bash scripts/aws-sso-setup.sh --login"; }
+  || { err "Session expired or credentials invalid."; echo; die "Re-run: aws configure --profile aws-free-tier"; }
 
 ACCOUNT=$(echo "$IDENTITY" | python3 -c "import sys,json; print(json.load(sys.stdin)['Account'])")
 ARN=$(echo "$IDENTITY"     | python3 -c "import sys,json; print(json.load(sys.stdin)['Arn'])")
