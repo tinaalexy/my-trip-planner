@@ -59,12 +59,12 @@ else
   echo "   ⚠  bandit not installed — skipping (pip install bandit)"
 fi
 
-step "Backend — Safety dependency scan"
-if command -v safety &>/dev/null; then
-  (cd "$REPO_ROOT/backend" && safety scan 2>&1) \
-    && ok "Safety: no known vulnerabilities" || err "Safety found vulnerable dependencies"
+step "Backend — pip-audit dependency scan"
+if command -v pip-audit &>/dev/null; then
+  (cd "$REPO_ROOT/backend" && pip-audit 2>&1) \
+    && ok "pip-audit: no known vulnerabilities" || err "pip-audit found vulnerable dependencies"
 else
-  echo "   ⚠  safety not installed — skipping (pip install safety)"
+  echo "   ⚠  pip-audit not installed — skipping (pip install pip-audit)"
 fi
 
 # ── BACKEND PRIVACY ───────────────────────────────────────────────────────────
