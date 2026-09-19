@@ -1,0 +1,96 @@
+name: Stop Services
+
+# Drains ECS tasks, stops the EC2 host, then stops RDS.
+# Frontend (S3 + CloudFront) is unaffected — it keeps serving static files.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "stop" to confirm shutdown'
+        required: true
+
+jobs:
+  stop-services:
+    name: Stop ECS → EC2 → RDS
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.confirm == 'stop' }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # Step 1 — drain ECS tasks first so the app stops cleanly
+      - name: Stop ECS tasks (DesiredCount → 0)
+        run: |
+          echo "Setting ECS desired count to 0..."
+          aws ecs update-service \
+            --cluster  "${{ secrets.ECS_CLUSTER }}" \
+            --service  "${{ secrets.ECS_SERVICE }}" \
+            --desired-count 0 \
+            --region   "${{ secrets.AWS_REGION }}"
+
+          echo "Waiting for tasks to drain..."
+          aws ecs wait services-stable \
+            --cluster  "${{ secrets.ECS_CLUSTER }}" \
+            --services "${{ secrets.ECS_SERVICE }}" \
+            --region   "${{ secrets.AWS_REGION }}"
+          echo "ECS service drained — 0 running tasks."
+
+      # Step 2 — stop the EC2 host (tasks are already gone)
+      - name: Stop EC2 instance
+        run: |
+          EC2_ID=$(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:Name,Values=my-trip-advisor-ecs-host" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --region "${{ secrets.AWS_REGION }}" \
+            --output text)
+
+          if [[ -z "$EC2_ID" || "$EC2_ID" == "None" ]]; then
+            echo "No running EC2 instance found — already stopped."
+            exit 0
+          fi
+
+          echo "Stopping EC2 instance: $EC2_ID"
+          aws ec2 stop-instances \
+            --instance-ids "$EC2_ID" \
+            --region "${{ secrets.AWS_REGION }}"
+          aws ec2 wait instance-stopped \
+            --instance-ids "$EC2_ID" \
+            --region "${{ secrets.AWS_REGION }}"
+          echo "EC2 instance stopped."
+
+      # Step 3 — stop RDS last (EC2/app no longer writing to it)
+      - name: Stop RDS instance
+        run: |
+          STATUS=$(aws rds describe-db-instances \
+            --db-instance-identifier my-trip-advisor-db \
+            --query 'DBInstances[0].DBInstanceStatus' \
+            --region "${{ secrets.AWS_REGION }}" \
+            --output text 2>/dev/null || echo "not-found")
+
+          if [[ "$STATUS" == "available" ]]; then
+            echo "Stopping RDS instance..."
+            aws rds stop-db-instance \
+              --db-instance-identifier my-trip-advisor-db \
+              --region "${{ secrets.AWS_REGION }}"
+            echo "RDS stop initiated — will complete in the background (~2 min)."
+          else
+            echo "RDS status is '$STATUS' — nothing to do."
+          fi
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "Services stopped:"
+          echo "  ✓ ECS tasks drained (DesiredCount = 0)"
+          echo "  ✓ EC2 instance stopped"
+          echo "  ✓ RDS stop initiated"
+          echo ""
+          echo "Frontend (CloudFront + S3) is still serving static files."
+          echo "Run the 'Start Services' workflow to bring everything back up."
