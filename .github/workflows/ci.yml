@@ -59,15 +59,14 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install security tools
-        run: pip install bandit safety
+        run: pip install bandit pip-audit
 
       - name: Bandit — static security analysis
         # -ll = medium+ severity, skip test files (they intentionally use weak passwords)
         run: bandit -r app/ -ll --skip B101 -q
 
-      - name: Safety — dependency vulnerability check
-        run: safety scan --policy-file .safety-policy.yml 2>/dev/null || safety scan
-        continue-on-error: false
+      - name: pip-audit — dependency vulnerability check
+        run: pip-audit
 
       - name: Privacy — scan for hardcoded secrets / PII patterns
         run: |
