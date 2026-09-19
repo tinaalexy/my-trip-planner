@@ -77,6 +77,7 @@ jobs:
             --cluster "${{ secrets.ECS_CLUSTER }}" \
             --service "${{ secrets.ECS_SERVICE }}" \
             --task-definition "${{ steps.task-def.outputs.task_def_arn }}" \
+            --desired-count 1 \
             --force-new-deployment \
             --region "${{ secrets.AWS_REGION }}"
 
