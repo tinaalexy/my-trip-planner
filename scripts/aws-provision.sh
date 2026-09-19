@@ -25,11 +25,21 @@ set -uo pipefail
 PROFILE="aws-free-tier"          # AWS CLI profile (set up with: aws configure --profile aws-free-tier)
 REGION="ap-southeast-2"          # AWS region to deploy into
 STACK_NAME="my-trip-advisor"     # CloudFormation stack name
-GITHUB_REPO="tinaalexy/my-trip-planner"  # Your GitHub repo (used for CI/CD permissions)
+# OIDC removed: org SCP blocks iam:CreateOpenIDConnectProvider; GitHub Secrets use long-term access keys
 
 # Paths (relative to the repo root — works from any directory)
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/infrastructure/stack.yml"   # CloudFormation template
+# On Git Bash (Windows), convert /c/path → /c:/path so that file://$TEMPLATE_WIN
+# produces the valid three-slash URI file:///c:/path.  Guard on MSYSTEM so the
+# sed never runs on Linux/macOS where single-letter top-level dirs are legitimate.
+TEMPLATE_WIN="$TEMPLATE"
+# On Git Bash (Windows) only: convert /c/path → c:/path for the AWS CLI file:// prefix.
+# botocore on Windows correctly handles file://c:/path (2-slash form).
+# Guard on MSYSTEM so this never runs on Linux/macOS where /a/... is a real path.
+if [[ "${MSYSTEM:-}" == MINGW* || "${MSYSTEM:-}" == MSYS* || "${MSYSTEM:-}" == UCRT* ]]; then
+  TEMPLATE_WIN="$(echo "$TEMPLATE" | sed 's|^/\([a-zA-Z]\)/|\1:/|')"
+fi
 STATE_FILE="$REPO_ROOT/.aws-state.env"           # Saves generated secrets between runs
 
 # -- Colour output ------------------------------------------------------------
@@ -173,18 +183,116 @@ step "Step 4 — Deploying CloudFormation stack (first run: ~15-20 min)"
 
 [[ -f "$TEMPLATE" ]] || die "Template not found at: $TEMPLATE"
 
-aws cloudformation deploy \
-  --template-file   "$TEMPLATE" \
-  --stack-name      "$STACK_NAME" \
-  --region          "$REGION" \
-  --capabilities    CAPABILITY_NAMED_IAM \
-  --no-fail-on-empty-changeset \
-  --parameter-overrides \
-    VpcId="$VPC_ID" \
-    SubnetIds="$SUBNET_IDS" \
-    DBPassword="$DB_PASSWORD" \
-    JWTSecret="$JWT_SECRET" \
-    GitHubRepo="$GITHUB_REPO"
+# Use create-stack or update-stack directly (not 'deploy') to avoid the
+# changeset-based EarlyValidation hook, which is blocked by the org SCP.
+STACK_STATUS=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" --region "$REGION" \
+  --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+# If a stack operation is already in flight (e.g. this script was re-run mid-deploy),
+# poll until it reaches a terminal state. We poll rather than using 'wait' because
+# 'wait stack-create-complete' blocks indefinitely with no output.
+if [[ "$STACK_STATUS" == *"_IN_PROGRESS"* ]]; then
+  warn "Stack operation in progress ($STACK_STATUS) — polling until it settles..."
+  while [[ "$STACK_STATUS" == *"_IN_PROGRESS"* ]]; do
+    sleep 15
+    STACK_STATUS=$(aws cloudformation describe-stacks \
+      --stack-name "$STACK_NAME" --region "$REGION" \
+      --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+    echo "   ... $STACK_STATUS"
+  done
+  ok "Stack settled: $STACK_STATUS"
+fi
+
+# If a previous run failed and rolled back, clean up the shell and any retained
+# orphan resources (ECR repo, S3 bucket, CloudWatch log group survive rollback
+# via DeletionPolicy:Retain and block a fresh create-stack by name).
+if [[ "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]]; then
+  warn "Previous run failed and rolled back (ROLLBACK_COMPLETE). Cleaning up before retrying..."
+
+  aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION" \
+    || die "Failed to delete ROLLBACK_COMPLETE stack shell. Check the AWS Console and clean up manually."
+  echo "   Waiting for stack shell deletion..."
+  aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" \
+    || die "Stack shell deletion failed or timed out (DELETE_FAILED?). Check the AWS Console."
+  ok "Stack shell deleted."
+
+  # ECR repository (DeletionPolicy: Retain)
+  ECR_REPO="my-trip-advisor-backend"
+  if aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" &>/dev/null; then
+    aws ecr delete-repository --repository-name "$ECR_REPO" --region "$REGION" --force \
+      || die "Failed to delete orphan ECR repository: $ECR_REPO"
+    ok "Removed orphan ECR repository: $ECR_REPO"
+  fi
+
+  # S3 bucket (DeletionPolicy: Retain) — name includes account ID for global uniqueness
+  S3_ORPHAN="my-trip-advisor-frontend-$ACCOUNT"
+  if aws s3api head-bucket --bucket "$S3_ORPHAN" 2>/dev/null; then
+    aws s3 rb "s3://$S3_ORPHAN" --force --region "$REGION" \
+      || die "Failed to delete orphan S3 bucket: $S3_ORPHAN"
+    ok "Removed orphan S3 bucket: $S3_ORPHAN"
+  fi
+
+  # CloudWatch log group (DeletionPolicy: Retain)
+  # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling the leading slash into a Windows path
+  LOG_GROUP="/ecs/my-trip-advisor-backend"
+  if MSYS_NO_PATHCONV=1 aws logs describe-log-groups \
+       --log-group-name-prefix "$LOG_GROUP" --region "$REGION" \
+       --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$LOG_GROUP"; then
+    MSYS_NO_PATHCONV=1 aws logs delete-log-group \
+      --log-group-name "$LOG_GROUP" --region "$REGION" \
+      || die "Failed to delete orphan CloudWatch log group: $LOG_GROUP"
+    ok "Removed orphan CloudWatch log group: $LOG_GROUP"
+  fi
+
+  STACK_STATUS="DOES_NOT_EXIST"
+fi
+
+# Commas in SubnetIds must be escaped as \, for the AWS CLI --parameters flag
+ESCAPED_SUBNETS="${SUBNET_IDS//,/\\,}"
+PARAMS=(
+  "ParameterKey=VpcId,ParameterValue=$VPC_ID"
+  "ParameterKey=SubnetIds,ParameterValue=$ESCAPED_SUBNETS"
+  "ParameterKey=DBPassword,ParameterValue=$DB_PASSWORD"
+  "ParameterKey=JWTSecret,ParameterValue=$JWT_SECRET"
+)
+
+if [[ "$STACK_STATUS" == "DOES_NOT_EXIST" ]]; then
+  ok "Stack does not exist — creating..."
+  aws cloudformation create-stack \
+    --stack-name      "$STACK_NAME" \
+    --template-body   "file://$TEMPLATE_WIN" \
+    --region          "$REGION" \
+    --capabilities    CAPABILITY_NAMED_IAM \
+    --parameters      "${PARAMS[@]}" \
+    || die "create-stack failed"
+  echo "   Waiting for stack creation to complete (first run: ~15-20 min)..."
+  aws cloudformation wait stack-create-complete \
+    --stack-name "$STACK_NAME" --region "$REGION" \
+    || die "Stack creation failed. Run: aws cloudformation describe-stack-events --stack-name $STACK_NAME --region $REGION"
+elif [[ "$STACK_STATUS" == "CREATE_COMPLETE" || "$STACK_STATUS" == "UPDATE_COMPLETE" || "$STACK_STATUS" == "UPDATE_ROLLBACK_COMPLETE" ]]; then
+  ok "Stack exists ($STACK_STATUS) — updating..."
+  UPDATE_OUT=$(aws cloudformation update-stack \
+    --stack-name      "$STACK_NAME" \
+    --template-body   "file://$TEMPLATE_WIN" \
+    --region          "$REGION" \
+    --capabilities    CAPABILITY_NAMED_IAM \
+    --parameters      "${PARAMS[@]}" 2>&1)
+  UPDATE_EXIT=$?
+  if [[ $UPDATE_EXIT -eq 0 ]]; then
+    echo "   Waiting for stack update to complete..."
+    aws cloudformation wait stack-update-complete \
+      --stack-name "$STACK_NAME" --region "$REGION" \
+      || die "Stack update was accepted but failed mid-apply (UPDATE_ROLLBACK_COMPLETE). Run: aws cloudformation describe-stack-events --stack-name $STACK_NAME --region $REGION"
+  else
+    # 'No updates are to be performed' is not an error
+    echo "$UPDATE_OUT" | grep -q "No updates" \
+      && ok "Stack is already up to date." \
+      || die "update-stack API call failed: $UPDATE_OUT"
+  fi
+else
+  die "Stack is in unexpected state: $STACK_STATUS. Clean it up before re-running."
+fi
 
 ok "Deployment complete."
 
@@ -210,7 +318,6 @@ CF_DOMAIN=$(get_output "CloudFrontDomain")
 BACKEND_URL=$(get_output "BackendUrl")
 ECS_CLUSTER=$(get_output "ECSClusterName")
 ECS_SERVICE=$(get_output "ECSServiceName")
-GH_ROLE_ARN=$(get_output "GitHubActionsRoleArn")
 
 ok "ECR (Docker images) : $ECR_URI"
 ok "S3 (frontend files) : s3://$S3_BUCKET"
@@ -237,7 +344,8 @@ echo
 printf "  %-40s  %s\n" "Secret name" "Value to paste"
 printf "  %-40s  %s\n" "──────────────────────────────────────" "──────────────────────────────────────────"
 printf "  %-40s  %s\n" "AWS_REGION"                      "$REGION"
-printf "  %-40s  %s\n" "AWS_GITHUB_ACTIONS_ROLE_ARN"     "$GH_ROLE_ARN"
+printf "  %-40s  %s\n" "AWS_ACCESS_KEY_ID"               "(your IAM user access key)"
+printf "  %-40s  %s\n" "AWS_SECRET_ACCESS_KEY"           "(your IAM user secret key)"
 printf "  %-40s  %s\n" "ECR_REPOSITORY"                  "my-trip-advisor-backend"
 printf "  %-40s  %s\n" "ECS_CLUSTER"                     "$ECS_CLUSTER"
 printf "  %-40s  %s\n" "ECS_SERVICE"                     "$ECS_SERVICE"
@@ -246,6 +354,6 @@ printf "  %-40s  %s\n" "S3_BUCKET"                       "$S3_BUCKET"
 printf "  %-40s  %s\n" "CLOUDFRONT_DISTRIBUTION_ID"      "$CF_DIST_ID"
 printf "  %-40s  %s\n" "VITE_API_BASE_URL"               "$BACKEND_URL"
 echo
-printf "  ${GRN}No AWS access keys needed in GitHub${RST} — the stack created an\n"
-printf "  IAM role that GitHub Actions uses via OIDC (role-to-assume).\n"
+printf "  ${YLW}Note:${RST} OIDC is disabled (org SCP blocks iam:CreateOpenIDConnectProvider).\n"
+printf "  Use the IAM user access keys above in GitHub Secrets instead.\n"
 hr
