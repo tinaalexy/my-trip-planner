@@ -2,6 +2,7 @@ fastapi>=0.111
 uvicorn[standard]>=0.29
 sqlmodel>=0.0.18
 alembic>=1.13
+psycopg2-binary>=2.9
 pyjwt>=2.8
 bcrypt>=4.0
 pydantic-settings>=2.2
